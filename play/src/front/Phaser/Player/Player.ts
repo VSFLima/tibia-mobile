@@ -13,6 +13,7 @@ import { WOKA_SPEED } from "../../Enum/EnvironmentVariable";
 import { visibilityStore } from "../../Stores/VisibilityStore";
 import { passStatusToOnline } from "../../Rules/StatusRules/statusChangerFunctions";
 import { localUserStore } from "../../Connection/LocalUserStore";
+import { getRPGManager, type RPGStats } from "../Tibia/RPGSystem";
 
 export const hasMovedEventName = "hasMoved";
 export const startMovingEventName = "startMoving";
@@ -21,6 +22,9 @@ export const requestEmoteEventName = "requestEmote";
 export class Player extends Character {
     private readonly unsubscribeVisibilityStore: Unsubscriber;
     private isMoving = false;
+
+    // RPG Stats
+    private rpgManager = getRPGManager();
 
     constructor(
         Scene: GameScene,
@@ -42,6 +46,76 @@ export class Player extends Character {
                 this.finishFollowingPath(true);
             }
         });
+    }
+
+    // ============ RPG METHODS ============
+    public getRPGStats(): RPGStats {
+        return this.rpgManager.getStats();
+    }
+
+    public getRPGLoad(): number {
+        return this.rpgManager.getStats().level;
+    }
+
+    public rpgTakeDamage(amount: number): number {
+        const damage = this.rpgManager.takeDamage(amount);
+        if (this.rpgManager.isDead()) {
+            this.rpgDie();
+        }
+        return damage;
+    }
+
+    public rpgHeal(amount: number): number {
+        return this.rpgManager.heal(amount);
+    }
+
+    public rpgHealMana(amount: number): number {
+        return this.rpgManager.healMana(amount);
+    }
+
+    public rpgUseMana(amount: number): boolean {
+        return this.rpgManager.useMana(amount);
+    }
+
+    public rpgGainXp(amount: number): number {
+        return this.rpgManager.gainXp(amount);
+    }
+
+    public rpgDie(): void {
+        this.rpgManager.die();
+        // Respawn after delay
+        this.scene.time.delayedCall(10000, () => {
+            this.rpgRespawn();
+        });
+    }
+
+    public rpgRespawn(): void {
+        this.rpgManager.respawn();
+        this.teleportTo(0, 0); // Respawn at start
+    }
+
+    public rpgAddItem(itemId: string, count?: number): boolean {
+        return this.rpgManager.addItem(itemId, count);
+    }
+
+    public rpgRemoveItem(itemId: string, count?: number): boolean {
+        return this.rpgManager.removeItem(itemId, count);
+    }
+
+    public rpgEquip(itemId: string, slot: string): string | null {
+        return this.rpgManager.equip(itemId, slot);
+    }
+
+    public rpgAcceptQuest(questId: string): boolean {
+        return this.rpgManager.acceptQuest(questId);
+    }
+
+    public rpgCheckQuestProgress(monsterType: string): void {
+        this.rpgManager.checkQuestProgress(monsterType);
+    }
+
+    public rpgSave(): void {
+        this.rpgManager.save();
     }
 
     public moveUser(delta: number, activeUserInputEvents: ActiveEventList): void {

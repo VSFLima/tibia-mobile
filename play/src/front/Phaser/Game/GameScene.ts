@@ -48,6 +48,7 @@ import { lazyLoadPlayerCharacterTextures } from "../Entity/PlayerTexturesLoading
 import { lazyLoadPlayerCompanionTexture } from "../Companion/CompanionTexturesLoadingManager";
 import { iframeListener } from "../../Api/IframeListener";
 import { coWebsiteManager, coWebsites } from "../../Stores/CoWebsiteStore";
+import { getRPGManager } from "../Tibia/RPGSystem";
 import {
     ADMIN_URL,
     DEBUG_MODE,
@@ -1332,6 +1333,8 @@ export class GameScene extends DirtyScene {
 
         if (this.hasJoinedRoom) {
             this.CurrentPlayer.moveUser(delta, this.userInputManager.getEventListForGameTick());
+            // Update RPG HUD
+            this.updateRPGHUD(delta);
         }
         if (this.mapEditorModeManager?.isActive()) {
             this.mapEditorModeManager.update(time, delta);
@@ -1465,6 +1468,103 @@ export class GameScene extends DirtyScene {
         if (DEBUG_MODE) {
             this.updateServerViewportDebugOverlay();
         }
+    }
+
+    // ============ RPG HUD UPDATE ============
+    private rpgHudGraphics?: Phaser.GameObjects.Graphics;
+    private rpgHudTexts: Phaser.GameObjects.Text[] = [];
+    private rpgUpdateTimer = 0;
+
+    private updateRPGHUD(delta: number): void {
+        this.rpgUpdateTimer += delta;
+        if (this.rpgUpdateTimer < 100) return; // Update every 100ms
+        this.rpgUpdateTimer = 0;
+
+        // Clear old graphics and texts
+        if (this.rpgHudGraphics) this.rpgHudGraphics.clear();
+        for (const text of this.rpgHudTexts) text.destroy();
+        this.rpgHudTexts = [];
+
+        if (!this.CurrentPlayer) return;
+
+        const stats = this.CurrentPlayer.getRPGStats();
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const sc = Math.min(w / 800, cam.height / 600);
+
+        // Create graphics if needed
+        if (!this.rpgHudGraphics) {
+            this.rpgHudGraphics = this.add.graphics();
+            this.rpgHudGraphics.setScrollFactor(0);
+            this.rpgHudGraphics.setDepth(1000);
+        }
+
+        const g = this.rpgHudGraphics;
+
+        // Background panel
+        g.fillStyle(0x000000, 0.7);
+        g.fillRect(5, 5, 200 * sc, 80 * sc);
+        g.lineStyle(2, 0x8B7355);
+        g.strokeRect(5, 5, 200 * sc, 80 * sc);
+
+        // Level text
+        const levelText = this.add.text(12, 20 * sc, `Level ${stats.level}`, {
+            fontSize: `${12 * sc}px monospace`,
+            color: '#FFD700'
+        });
+        levelText.setScrollFactor(0);
+        levelText.setDepth(1001);
+        this.rpgHudTexts.push(levelText);
+
+        // HP bar
+        const barW = 186 * sc;
+        const barH = 12 * sc;
+        g.fillStyle(0x333333);
+        g.fillRect(12, 30 * sc, barW, barH);
+        const hpRatio = stats.hp / stats.maxHp;
+        g.fillStyle(hpRatio > 0.5 ? 0x00ff00 : hpRatio > 0.25 ? 0xffff00 : 0xff0000);
+        g.fillRect(12, 30 * sc, barW * hpRatio, barH);
+
+        const hpText = this.add.text(14, 30 * sc + barH - 2, `HP: ${stats.hp}/${stats.maxHp}`, {
+            fontSize: `${9 * sc}px monospace`,
+            color: '#ffffff'
+        });
+        hpText.setScrollFactor(0);
+        hpText.setDepth(1001);
+        this.rpgHudTexts.push(hpText);
+
+        // MP bar
+        const mpY = 30 * sc + barH + 3;
+        g.fillStyle(0x333333);
+        g.fillRect(12, mpY, barW, barH);
+        const mpRatio = stats.mp / stats.maxMp;
+        g.fillStyle(0x4488ff);
+        g.fillRect(12, mpY, barW * mpRatio, barH);
+
+        const mpText = this.add.text(14, mpY + barH - 2, `MP: ${stats.mp}/${stats.maxMp}`, {
+            fontSize: `${9 * sc}px monospace`,
+            color: '#ffffff'
+        });
+        mpText.setScrollFactor(0);
+        mpText.setDepth(1001);
+        this.rpgHudTexts.push(mpText);
+
+        // XP bar
+        const xpY = mpY + barH + 3;
+        g.fillStyle(0x333333);
+        g.fillRect(12, xpY, barW, 6 * sc);
+        const xpRatio = stats.xp / stats.xpToLevel;
+        g.fillStyle(0xffa500);
+        g.fillRect(12, xpY, barW * xpRatio, 6 * sc);
+
+        // Gold and info
+        const infoText = this.add.text(12, xpY + 12 * sc, `💰${stats.gold}g | ATK:${this.CurrentPlayer.rpgManager?.totalAttack || stats.attack} | DEF:${this.CurrentPlayer.rpgManager?.totalDefense || stats.defense}`, {
+            fontSize: `${9 * sc}px monospace`,
+            color: '#FFD700'
+        });
+        infoText.setScrollFactor(0);
+        infoText.setDepth(1001);
+        this.rpgHudTexts.push(infoText);
     }
 
     private addConversationBubblesAffectedByPlayerMove(
