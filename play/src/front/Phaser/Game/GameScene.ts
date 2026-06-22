@@ -48,7 +48,9 @@ import { lazyLoadPlayerCharacterTextures } from "../Entity/PlayerTexturesLoading
 import { lazyLoadPlayerCompanionTexture } from "../Companion/CompanionTexturesLoadingManager";
 import { iframeListener } from "../../Api/IframeListener";
 import { coWebsiteManager, coWebsites } from "../../Stores/CoWebsiteStore";
-import { getRPGManager } from "../Tibia/RPGSystem";
+import { getRPGManager, RPG_ITEMS, RPG_QUESTS } from "../Tibia/RPGSystem";
+import { getMonsterById } from "../Tibia/data/monsters";
+import type { MonsterData } from "../Tibia/data/types";
 import {
     ADMIN_URL,
     DEBUG_MODE,
@@ -827,6 +829,15 @@ export class GameScene extends DirtyScene {
 
         this.animatedTiles.init(this.Map);
 
+        this.spawnRPGMonsters();
+        this.spawnRPGNPCs();
+
+        // Load saved RPG data
+        const rpgManager = this.CurrentPlayer?.rpgManager;
+        if (rpgManager) {
+            rpgManager.load();
+        }
+
         // Phaser unsubscribes from the events when the scene is destroyed, so we don't need to unsubscribe here
         // eslint-disable-next-line listeners/no-missing-remove-event-listener,listeners/no-inline-function-event-listener
         this.events.on("tileanimationupdate", () => (this.dirty = true));
@@ -1162,6 +1173,49 @@ export class GameScene extends DirtyScene {
     }
 
     public cleanupClosingScene(): void {
+        // Cleanup RPG monsters
+        for (const m of this.rpgMonsters) {
+            m.sprite.destroy();
+            m.label.destroy();
+            m.hpBar.destroy();
+        }
+        this.rpgMonsters = [];
+        if (this.rpgBattleGraphics) {
+            this.rpgBattleGraphics.destroy();
+            this.rpgBattleGraphics = undefined;
+        }
+        this.rpgBattleTexts.forEach(t => t.destroy());
+        this.rpgBattleTexts = [];
+
+        // Cleanup RPG UI panels
+        for (const t of this.rpgInventoryTexts) t.destroy();
+        this.rpgInventoryTexts = [];
+        for (const t of this.rpgQuestTexts) t.destroy();
+        this.rpgQuestTexts = [];
+        for (const t of this.rpgNpcDialogTexts) t.destroy();
+        this.rpgNpcDialogTexts = [];
+        for (const t of this.rpgShopTexts) t.destroy();
+        this.rpgShopTexts = [];
+        for (const t of this.rpgMessageLogTexts) t.destroy();
+        this.rpgMessageLogTexts = [];
+        if (this.rpgInventoryGraphics) { this.rpgInventoryGraphics.destroy(); this.rpgInventoryGraphics = undefined; }
+        if (this.rpgQuestGraphics) { this.rpgQuestGraphics.destroy(); this.rpgQuestGraphics = undefined; }
+        if (this.rpgNpcDialogGraphics) { this.rpgNpcDialogGraphics.destroy(); this.rpgNpcDialogGraphics = undefined; }
+        if (this.rpgShopGraphics) { this.rpgShopGraphics.destroy(); this.rpgShopGraphics = undefined; }
+        if (this.rpgMessageLogGraphics) { this.rpgMessageLogGraphics.destroy(); this.rpgMessageLogGraphics = undefined; }
+        this.rpgMessageLog = [];
+        for (const npc of this.rpgNpcSprites) {
+            npc.sprite.destroy();
+            npc.label.destroy();
+        }
+        this.rpgNpcSprites = [];
+
+        // Cleanup death overlay and save message
+        this.hideRPGDeathOverlay();
+        this.hideRPGSaveMessage();
+        if (this.rpgDeathOverlayGraphics) { this.rpgDeathOverlayGraphics.destroy(); this.rpgDeathOverlayGraphics = undefined; }
+        if (this.rpgSaveMessageGraphics) { this.rpgSaveMessageGraphics.destroy(); this.rpgSaveMessageGraphics = undefined; }
+
         // make sure we restart own medias
         mediaManager.disableMyCamera();
         mediaManager.disableMyMicrophone();
@@ -1335,6 +1389,100 @@ export class GameScene extends DirtyScene {
             this.CurrentPlayer.moveUser(delta, this.userInputManager.getEventListForGameTick());
             // Update RPG HUD
             this.updateRPGHUD(delta);
+            // Update RPG monsters
+            this.updateRPGMonsters(delta);
+            this.checkRPGProximity();
+            this.updateRPGMessageLog();
+            // Battle keyboard input
+            if (this.rpgBattleActive && this.rpgBattleAwaitingInput && this.rpgBattlePlayerTurn) {
+                const kb = this.input.keyboard;
+                if (kb) {
+                    if (Phaser.Input.Keyboard.JustDown(kb.addKey('SPACE'))) {
+                        this.processRPGAction(this.rpgBattleActionIndex);
+                    } else if (Phaser.Input.Keyboard.JustDown(kb.addKey('UP'))) {
+                        this.rpgBattleActionIndex = Math.max(0, this.rpgBattleActionIndex - 1);
+                        this.updateRPGBattleDisplay();
+                    } else if (Phaser.Input.Keyboard.JustDown(kb.addKey('DOWN'))) {
+                        this.rpgBattleActionIndex = Math.min(4, this.rpgBattleActionIndex + 1);
+                        this.updateRPGBattleDisplay();
+                    } else {
+                        for (let i = 0; i < 5; i++) {
+                            const keyName = String(i + 1);
+                            if (Phaser.Input.Keyboard.JustDown(kb.addKey(keyName))) {
+                                this.rpgBattleActionIndex = i;
+                                this.processRPGAction(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // RPG UI Panel keyboard handling
+        if (!this.rpgBattleActive && this.hasJoinedRoom) {
+            const kbUI = this.input.keyboard;
+            if (kbUI) {
+                if (Phaser.Input.Keyboard.JustDown(kbUI.addKey('I'))) {
+                    this.toggleRPGInventory();
+                }
+                if (Phaser.Input.Keyboard.JustDown(kbUI.addKey('Q'))) {
+                    this.toggleRPGQuestPanel();
+                }
+                if (Phaser.Input.Keyboard.JustDown(kbUI.addKey('E'))) {
+                    this.handleRPGInteract();
+                }
+                if (Phaser.Input.Keyboard.JustDown(kbUI.addKey('ESC'))) {
+                    this.closeAllRPGPanels();
+                }
+                if (this.rpgInventoryOpen) {
+                    for (let i = 0; i < 9; i++) {
+                        if (Phaser.Input.Keyboard.JustDown(kbUI.addKey(String(i + 1)))) {
+                            this.useRPGInventoryItem(i);
+                            break;
+                        }
+                    }
+                    for (let i = 0; i < 6; i++) {
+                        if (Phaser.Input.Keyboard.JustDown(kbUI.addKey(`F${i + 1}`))) {
+                            this.unequipRPGSlot(i);
+                            break;
+                        }
+                    }
+                }
+                if (this.rpgShopOpen) {
+                    for (let i = 0; i < 9; i++) {
+                        if (Phaser.Input.Keyboard.JustDown(kbUI.addKey(String(i + 1)))) {
+                            this.buyRPGShopItem(i);
+                            break;
+                        }
+                    }
+                }
+                if (Phaser.Input.Keyboard.JustDown(kbUI.addKey('F12'))) {
+                    this.performRPGSave();
+                }
+            }
+        }
+        // Auto-save every 30 seconds
+        if (this.hasJoinedRoom && this.CurrentPlayer) {
+            this.rpgAutoSaveTimer += delta;
+            if (this.rpgAutoSaveTimer >= this.rpgAutoSaveInterval) {
+                this.rpgAutoSaveTimer = 0;
+                this.CurrentPlayer.rpgSave();
+                this.addRPGMessage('Game auto-saved.', '#88ff88');
+            }
+        }
+        // Death overlay and respawn
+        if (this.rpgDeathOverlayActive) {
+            this.rpgDeathTimer += delta;
+            if (this.rpgDeathTimer >= this.rpgDeathDelay) {
+                this.handleRPGRespawn();
+            }
+        }
+        // Update save message display
+        if (this.rpgSaveMessageTimer > 0) {
+            this.rpgSaveMessageTimer -= delta;
+            if (this.rpgSaveMessageTimer <= 0) {
+                this.hideRPGSaveMessage();
+            }
         }
         if (this.mapEditorModeManager?.isActive()) {
             this.mapEditorModeManager.update(time, delta);
@@ -1475,6 +1623,70 @@ export class GameScene extends DirtyScene {
     private rpgHudTexts: Phaser.GameObjects.Text[] = [];
     private rpgUpdateTimer = 0;
 
+    // ============ RPG MONSTERS ============
+    private rpgMonsters: {
+        sprite: Phaser.GameObjects.Rectangle;
+        label: Phaser.GameObjects.Text;
+        hpBar: Phaser.GameObjects.Graphics;
+        data: MonsterData;
+        currentHp: number;
+        maxHp: number;
+        wanderTimer: number;
+        wanderDir: { x: number; y: number };
+        aggroed: boolean;
+        spawnX: number;
+        spawnY: number;
+    }[] = [];
+    private rpgBattleActive = false;
+    private rpgBattleGraphics?: Phaser.GameObjects.Graphics;
+    private rpgBattleTexts: Phaser.GameObjects.Text[] = [];
+    private rpgBattleMonster: MonsterData | null = null;
+    private rpgBattleMonsterHp = 0;
+    private rpgBattleActionIndex = 0;
+    private rpgBattleMessages: string[] = [];
+    private rpgBattlePlayerTurn = true;
+    private rpgBattleAwaitingInput = false;
+    private rpgBattleKeyboard?: Phaser.Input.Keyboard.KeyboardPlugin;
+
+    // ============ RPG UI PANELS ============
+    private rpgInventoryOpen = false;
+    private rpgInventoryGraphics?: Phaser.GameObjects.Graphics;
+    private rpgInventoryTexts: Phaser.GameObjects.Text[] = [];
+    private rpgQuestOpen = false;
+    private rpgQuestGraphics?: Phaser.GameObjects.Graphics;
+    private rpgQuestTexts: Phaser.GameObjects.Text[] = [];
+    private rpgNpcDialogActive = false;
+    private rpgNpcDialogGraphics?: Phaser.GameObjects.Graphics;
+    private rpgNpcDialogTexts: Phaser.GameObjects.Text[] = [];
+    private rpgNpcDialogData: { name: string; text: string; questId?: string; shopItems?: string[] } | null = null;
+    private rpgShopOpen = false;
+    private rpgShopGraphics?: Phaser.GameObjects.Graphics;
+    private rpgShopTexts: Phaser.GameObjects.Text[] = [];
+    private rpgShopNpc: { name: string; items: string[] } | null = null;
+    private rpgMessageLog: { text: string; time: number; color: string }[] = [];
+    private rpgMessageLogGraphics?: Phaser.GameObjects.Graphics;
+    private rpgMessageLogTexts: Phaser.GameObjects.Text[] = [];
+    private rpgNpcs: { x: number; y: number; name: string; text: string; questId?: string; shopItems?: string[] }[] = [];
+    private rpgNpcSprites: {
+        sprite: Phaser.GameObjects.Rectangle;
+        label: Phaser.GameObjects.Text;
+        data: { x: number; y: number; name: string; text: string; questId?: string; shopItems?: string[] };
+    }[] = [];
+
+    // ============ RPG SAVE/LOAD & RESPAWN ============
+    private rpgAutoSaveTimer = 0;
+    private rpgAutoSaveInterval = 30000;
+    private rpgDeathOverlayGraphics?: Phaser.GameObjects.Graphics;
+    private rpgDeathOverlayTexts: Phaser.GameObjects.Text[] = [];
+    private rpgDeathOverlayActive = false;
+    private rpgDeathTimer = 0;
+    private rpgDeathDelay = 10000;
+    private rpgSaveMessageGraphics?: Phaser.GameObjects.Graphics;
+    private rpgSaveMessageText?: Phaser.GameObjects.Text;
+    private rpgSaveMessageTimer = 0;
+    private static readonly TEMPLE_X = 20 * 32;
+    private static readonly TEMPLE_Y = 15 * 32;
+
     private updateRPGHUD(delta: number): void {
         this.rpgUpdateTimer += delta;
         if (this.rpgUpdateTimer < 100) return; // Update every 100ms
@@ -1565,6 +1777,1188 @@ export class GameScene extends DirtyScene {
         infoText.setScrollFactor(0);
         infoText.setDepth(1001);
         this.rpgHudTexts.push(infoText);
+    }
+
+    // ============ RPG MONSTERS ============
+    private spawnRPGMonsters(): void {
+        const spawnList = [
+            { id: 'rat', x: 400, y: 300 }, { id: 'rat', x: 600, y: 350 },
+            { id: 'bug', x: 500, y: 500 }, { id: 'snake', x: 800, y: 400 },
+            { id: 'spider', x: 700, y: 600 }, { id: 'troll', x: 1000, y: 500 },
+            { id: 'orc', x: 1200, y: 400 }, { id: 'skeleton', x: 1400, y: 600 },
+        ];
+        for (const spawn of spawnList) {
+            const data = getMonsterById(spawn.id);
+            if (!data) continue;
+            const isAggressive = data.behavior === 'aggressive';
+            const color = isAggressive ? 0xff0000 : 0xffff00;
+            const sprite = this.add.rectangle(spawn.x, spawn.y, 28, 28, color);
+            sprite.setStrokeStyle(2, 0x000000);
+            this.physics.add.existing(sprite, false);
+            (sprite.body as Phaser.Physics.Arcade.Body).setSize(28, 28);
+
+            const label = this.add.text(spawn.x, spawn.y - 22, data.name, {
+                fontSize: '10px', color: '#ffffff', backgroundColor: '#000000aa',
+                padding: { x: 2, y: 1 },
+            }).setOrigin(0.5);
+            label.setDepth(50);
+
+            const hpBar = this.add.graphics();
+            hpBar.setDepth(51);
+
+            this.rpgMonsters.push({
+                sprite, label, hpBar, data,
+                currentHp: data.health, maxHp: data.health,
+                wanderTimer: 0, wanderDir: { x: 0, y: 0 },
+                aggroed: false, spawnX: spawn.x, spawnY: spawn.y,
+            });
+        }
+    }
+
+    private updateRPGMonsters(delta: number): void {
+        if (!this.CurrentPlayer || this.rpgBattleActive) return;
+        const px = this.CurrentPlayer.x;
+        const py = this.CurrentPlayer.y;
+
+        for (const m of this.rpgMonsters) {
+            if (m.currentHp <= 0) continue;
+            const body = m.sprite.body as Phaser.Physics.Arcade.Body;
+            const dx = px - m.sprite.x;
+            const dy = py - m.sprite.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const aggroRange = (m.data.maxRange || 5) * 32;
+
+            if (m.data.behavior === 'aggressive' && dist < aggroRange) {
+                m.aggroed = true;
+            } else if (dist > aggroRange * 1.5) {
+                m.aggroed = false;
+            }
+
+            if (m.aggroed && dist > 30) {
+                const spd = m.data.speed * 20;
+                body.setVelocity(
+                    (dx / dist) * spd,
+                    (dy / dist) * spd,
+                );
+            } else {
+                m.wanderTimer -= delta;
+                if (m.wanderTimer <= 0) {
+                    m.wanderTimer = 1000 + Math.random() * 2000;
+                    if (Math.random() < 0.4) {
+                        const angle = Math.random() * Math.PI * 2;
+                        m.wanderDir = { x: Math.cos(angle), y: Math.sin(angle) };
+                    } else {
+                        m.wanderDir = { x: 0, y: 0 };
+                    }
+                }
+                const ws = m.data.speed * 8;
+                body.setVelocity(m.wanderDir.x * ws, m.wanderDir.y * ws);
+            }
+
+            m.label.setPosition(m.sprite.x, m.sprite.y - 22);
+
+            m.hpBar.clear();
+            if (m.currentHp < m.maxHp) {
+                const bw = 28;
+                const bh = 4;
+                const bx = m.sprite.x - bw / 2;
+                const by = m.sprite.y + 18;
+                m.hpBar.fillStyle(0x333333);
+                m.hpBar.fillRect(bx, by, bw, bh);
+                const ratio = m.currentHp / m.maxHp;
+                m.hpBar.fillStyle(ratio > 0.5 ? 0x00ff00 : ratio > 0.25 ? 0xffff00 : 0xff0000);
+                m.hpBar.fillRect(bx, by, bw * ratio, bh);
+            }
+        }
+    }
+
+    private checkRPGProximity(): void {
+        if (!this.CurrentPlayer || this.rpgBattleActive) return;
+        const px = this.CurrentPlayer.x;
+        const py = this.CurrentPlayer.y;
+        for (const m of this.rpgMonsters) {
+            if (m.currentHp <= 0) continue;
+            const dx = px - m.sprite.x;
+            const dy = py - m.sprite.y;
+            if (dx * dx + dy * dy < 40 * 40) {
+                this.startRPGBattle(m.data);
+                break;
+            }
+        }
+    }
+
+    private startRPGBattle(monsterData: MonsterData): void {
+        if (this.rpgBattleActive) return;
+        this.rpgBattleActive = true;
+        this.rpgBattleMonster = monsterData;
+        this.rpgBattleMonsterHp = monsterData.health;
+        this.rpgBattleActionIndex = 0;
+        this.rpgBattleMessages = [`A wild ${monsterData.name} appears!`];
+        this.rpgBattlePlayerTurn = true;
+        this.rpgBattleAwaitingInput = true;
+
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const h = cam.height;
+
+        if (!this.rpgBattleGraphics) {
+            this.rpgBattleGraphics = this.add.graphics();
+        }
+        this.rpgBattleGraphics.setScrollFactor(0).setDepth(2000).setVisible(true);
+        this.rpgBattleGraphics.clear();
+        this.rpgBattleGraphics.fillStyle(0x000000, 0.85);
+        this.rpgBattleGraphics.fillRect(0, 0, w, h);
+        this.rpgBattleGraphics.lineStyle(3, 0x8B7355);
+        this.rpgBattleGraphics.strokeRect(w * 0.1, h * 0.1, w * 0.8, h * 0.8);
+
+        this.rpgBattleTexts.forEach(t => t.destroy());
+        this.rpgBattleTexts = [];
+
+        const title = this.add.text(w / 2, h * 0.15, `⚔ BATTLE ⚔`, {
+            fontSize: '24px', color: '#FFD700',
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(2001);
+        this.rpgBattleTexts.push(title);
+
+        const mName = this.add.text(w / 2, h * 0.22, monsterData.name, {
+            fontSize: '18px', color: '#ff4444',
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(2001);
+        this.rpgBattleTexts.push(mName);
+
+        this.rpgBattleTexts.push(
+            this.add.text(w * 0.15, h * 0.28, `HP: ${this.rpgBattleMonsterHp}/${monsterData.health}`, {
+                fontSize: '14px', color: '#ffffff',
+            }).setScrollFactor(0).setDepth(2001),
+        );
+
+        const actions = ['Attack', 'Magic', 'Heal', 'Defend', 'Run'];
+        for (let i = 0; i < actions.length; i++) {
+            const isSelected = i === this.rpgBattleActionIndex;
+            const t = this.add.text(w * 0.15, h * 0.55 + i * 28, `${isSelected ? '▶ ' : '  '}${i + 1}.${actions[i]}`, {
+                fontSize: '14px', color: isSelected ? '#FFD700' : '#cccccc',
+            }).setScrollFactor(0).setDepth(2001);
+            this.rpgBattleTexts.push(t);
+        }
+
+        const stats = this.CurrentPlayer.getRPGStats();
+        const info = this.add.text(w * 0.55, h * 0.55, `HP: ${stats.hp}/${stats.maxHp}\nMP: ${stats.mp}/${stats.maxMp}\nATK: ${stats.attack}\nDEF: ${stats.defense}`, {
+            fontSize: '13px', color: '#88ff88',
+        }).setScrollFactor(0).setDepth(2001);
+        this.rpgBattleTexts.push(info);
+
+        this.rpgBattleTexts.push(
+            this.add.text(w / 2, h * 0.88, 'SPACE: confirm | ↑↓: select', {
+                fontSize: '11px', color: '#888888',
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(2001),
+        );
+
+        this.input.keyboard?.removeCapture('SPACE,UP,DOWN');
+        this.rpgBattleKeyboard = this.input.keyboard;
+    }
+
+    private updateRPGBattleDisplay(): void {
+        if (!this.rpgBattleActive || !this.rpgBattleGraphics || !this.rpgBattleMonster) return;
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const h = cam.height;
+
+        this.rpgBattleTexts.forEach(t => t.destroy());
+        this.rpgBattleTexts = [];
+
+        const title = this.add.text(w / 2, h * 0.15, '⚔ BATTLE ⚔', {
+            fontSize: '24px', color: '#FFD700',
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(2001);
+        this.rpgBattleTexts.push(title);
+
+        const mName = this.add.text(w / 2, h * 0.22, this.rpgBattleMonster.name, {
+            fontSize: '18px', color: '#ff4444',
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(2001);
+        this.rpgBattleTexts.push(mName);
+
+        const hpColor = this.rpgBattleMonsterHp > this.rpgBattleMonster!.health * 0.5 ? '#00ff00' : '#ff4444';
+        this.rpgBattleTexts.push(
+            this.add.text(w * 0.15, h * 0.28, `HP: ${this.rpgBattleMonsterHp}/${this.rpgBattleMonster!.health}`, {
+                fontSize: '14px', color: hpColor,
+            }).setScrollFactor(0).setDepth(2001),
+        );
+
+        if (this.rpgBattlePlayerTurn && this.rpgBattleAwaitingInput) {
+            const actions = ['Attack', 'Magic', 'Heal', 'Defend', 'Run'];
+            for (let i = 0; i < actions.length; i++) {
+                const isSelected = i === this.rpgBattleActionIndex;
+                const t = this.add.text(w * 0.15, h * 0.55 + i * 28, `${isSelected ? '▶ ' : '  '}${i + 1}.${actions[i]}`, {
+                    fontSize: '14px', color: isSelected ? '#FFD700' : '#cccccc',
+                }).setScrollFactor(0).setDepth(2001);
+                this.rpgBattleTexts.push(t);
+            }
+        }
+
+        const stats = this.CurrentPlayer.getRPGStats();
+        const info = this.add.text(w * 0.55, h * 0.55, `HP: ${stats.hp}/${stats.maxHp}\nMP: ${stats.mp}/${stats.maxMp}\nATK: ${stats.attack}\nDEF: ${stats.defense}`, {
+            fontSize: '13px', color: '#88ff88',
+        }).setScrollFactor(0).setDepth(2001);
+        this.rpgBattleTexts.push(info);
+
+        const msgY = h * 0.78;
+        const recentMsgs = this.rpgBattleMessages.slice(-3);
+        for (let i = 0; i < recentMsgs.length; i++) {
+            this.rpgBattleTexts.push(
+                this.add.text(w * 0.15, msgY + i * 16, recentMsgs[i], {
+                    fontSize: '12px', color: '#ffffff',
+                }).setScrollFactor(0).setDepth(2001),
+            );
+        }
+
+        if (!this.rpgBattlePlayerTurn || !this.rpgBattleAwaitingInput) {
+            this.rpgBattleTexts.push(
+                this.add.text(w / 2, h * 0.88, 'Processing...', {
+                    fontSize: '11px', color: '#888888',
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(2001),
+            );
+        } else {
+            this.rpgBattleTexts.push(
+                this.add.text(w / 2, h * 0.88, 'SPACE: confirm | ↑↓: select', {
+                    fontSize: '11px', color: '#888888',
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(2001),
+            );
+        }
+    }
+
+    private processRPGAction(actionIndex: number): void {
+        if (!this.rpgBattleMonster || !this.rpgBattlePlayerTurn || !this.rpgBattleAwaitingInput) return;
+        this.rpgBattleAwaitingInput = false;
+
+        const actions = ['Attack', 'Magic', 'Heal', 'Defend', 'Run'];
+        const action = actions[actionIndex];
+        const stats = this.CurrentPlayer.getRPGStats();
+
+        switch (action) {
+            case 'Attack': {
+                const dmg = Math.max(1, stats.attack - Math.floor(this.rpgBattleMonster.defense * 0.3) + Math.floor(Math.random() * 4));
+                this.rpgBattleMonsterHp = Math.max(0, this.rpgBattleMonsterHp - dmg);
+                this.rpgBattleMessages.push(`You attack for ${dmg} damage!`);
+                break;
+            }
+            case 'Magic': {
+                if (!this.CurrentPlayer.rpgUseMana(10)) {
+                    this.rpgBattleMessages.push('Not enough mana!');
+                    this.rpgBattleAwaitingInput = true;
+                    this.updateRPGBattleDisplay();
+                    return;
+                }
+                const mgDmg = Math.max(1, stats.attack + stats.magicLevel * 5 - Math.floor(this.rpgBattleMonster.defense * 0.2) + Math.floor(Math.random() * 6));
+                this.rpgBattleMonsterHp = Math.max(0, this.rpgBattleMonsterHp - mgDmg);
+                this.rpgBattleMessages.push(`Magic attack for ${mgDmg} damage!`);
+                break;
+            }
+            case 'Heal': {
+                const healed = this.CurrentPlayer.rpgHeal(Math.floor(stats.maxHp * 0.3));
+                this.rpgBattleMessages.push(`You heal for ${healed} HP!`);
+                break;
+            }
+            case 'Defend': {
+                this.rpgBattleMessages.push('You defend! Damage reduced next turn.');
+                break;
+            }
+            case 'Run': {
+                if (Math.random() < 0.5) {
+                    this.rpgBattleMessages.push('You fled successfully!');
+                    this.endRPGBattle(false);
+                    return;
+                }
+                this.rpgBattleMessages.push('Failed to run!');
+                break;
+            }
+        }
+
+        this.updateRPGBattleDisplay();
+
+        if (this.rpgBattleMonsterHp <= 0) {
+            this.time.delayedCall(800, () => {
+                this.rpgBattleMessages.push(`${this.rpgBattleMonster!.name} is defeated!`);
+                const xpGain = this.rpgBattleMonster!.experience;
+                const goldGain = Math.floor(Math.random() * 10) + 1;
+                this.CurrentPlayer.rpgGainXp(xpGain);
+                this.CurrentPlayer.rpgCheckQuestProgress(this.rpgBattleMonster!.id);
+                const s = this.CurrentPlayer.getRPGStats();
+                s.gold += goldGain;
+                this.CurrentPlayer.rpgSave();
+                this.rpgBattleMessages.push(`+${xpGain} XP, +${goldGain} Gold`);
+                this.updateRPGBattleDisplay();
+                this.time.delayedCall(1500, () => this.endRPGBattle(true));
+            });
+            return;
+        }
+
+        this.rpgBattlePlayerTurn = false;
+        this.time.delayedCall(800, () => this.processRPGMonsterTurn());
+    }
+
+    private processRPGMonsterTurn(): void {
+        if (!this.rpgBattleMonster) return;
+        const stats = this.CurrentPlayer.getRPGStats();
+        const atk = this.rpgBattleMonster.attack;
+
+        let defendMult = 1;
+        if (this.rpgBattleMessages[this.rpgBattleMessages.length - 1]?.includes('defend')) {
+            defendMult = 0.5;
+        }
+
+        const dmg = Math.max(1, Math.floor((atk - stats.defense * 0.3) * defendMult) + Math.floor(Math.random() * 3));
+        this.CurrentPlayer.rpgTakeDamage(dmg);
+        this.rpgBattleMessages.push(`${this.rpgBattleMonster.name} attacks for ${dmg} damage!`);
+
+        this.updateRPGBattleDisplay();
+
+        if (this.CurrentPlayer.getRPGStats().hp <= 0) {
+            this.time.delayedCall(800, () => {
+                this.rpgBattleMessages.push('You have been defeated!');
+                this.updateRPGBattleDisplay();
+                this.time.delayedCall(1500, () => {
+                    this.endRPGBattle(true);
+                    this.CurrentPlayer.rpgManager.die();
+                    this.showRPGDeathOverlay();
+                });
+            });
+            return;
+        }
+
+        this.rpgBattlePlayerTurn = true;
+        this.rpgBattleAwaitingInput = true;
+        this.rpgBattleActionIndex = 0;
+        this.updateRPGBattleDisplay();
+    }
+
+    private endRPGBattle(victory: boolean): void {
+        this.rpgBattleActive = false;
+        this.rpgBattleMonster = null;
+        if (this.rpgBattleGraphics) {
+            this.rpgBattleGraphics.setVisible(false);
+            this.rpgBattleGraphics.clear();
+        }
+        this.rpgBattleTexts.forEach(t => t.destroy());
+        this.rpgBattleTexts = [];
+        this.input.keyboard?.addCapture('SPACE,UP,DOWN');
+    }
+
+    // ============ RPG UI PANELS ============
+
+    private getRPGSaveData(): { activeQuests: string[]; completedQuests: string[]; questProgress: Record<string, number> } | null {
+        try {
+            const raw = localStorage.getItem('wa_rpg_save');
+            if (raw) {
+                const data = JSON.parse(raw);
+                return {
+                    activeQuests: data.activeQuests || [],
+                    completedQuests: data.completedQuests || [],
+                    questProgress: data.questProgress || {},
+                };
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    public addRPGMessage(text: string, color: string = '#ffffff'): void {
+        this.rpgMessageLog.push({ text, time: this.currentTick, color });
+        if (this.rpgMessageLog.length > 20) this.rpgMessageLog.shift();
+    }
+
+    private spawnRPGNPCs(): void {
+        this.rpgNpcs = [
+            { x: 300, y: 250, name: 'Guildmaster', text: 'Welcome, adventurer! Clear the rats from the sewers. Will you help?', questId: 'q1' },
+            { x: 350, y: 300, name: 'Rashid', text: 'Welcome to my shop! Potions and equipment for sale.', shopItems: ['health_potion', 'mana_potion', 'strong_health', 'wooden_sword', 'leather_armor', 'iron_helmet'] },
+            { x: 250, y: 300, name: 'Oracle', text: 'The world is dangerous, but fortune favors the brave. Talk to the Guildmaster for work.' },
+        ];
+
+        for (const npc of this.rpgNpcs) {
+            const sprite = this.add.rectangle(npc.x, npc.y, 28, 28, 0x4488ff);
+            sprite.setStrokeStyle(2, 0x000000);
+            const label = this.add.text(npc.x, npc.y - 22, npc.name, {
+                fontSize: '10px', color: '#ffffff', backgroundColor: '#000066aa',
+                padding: { x: 2, y: 1 },
+            }).setOrigin(0.5).setDepth(50);
+
+            this.rpgNpcSprites.push({ sprite, label, data: npc });
+        }
+    }
+
+    private toggleRPGInventory(): void {
+        this.rpgInventoryOpen = !this.rpgInventoryOpen;
+        if (this.rpgInventoryOpen) {
+            this.closeAllRPGPanelsExcept('inventory');
+            this.drawRPGInventory();
+        } else {
+            this.destroyRPGInventory();
+        }
+    }
+
+    private toggleRPGQuestPanel(): void {
+        this.rpgQuestOpen = !this.rpgQuestOpen;
+        if (this.rpgQuestOpen) {
+            this.closeAllRPGPanelsExcept('quest');
+            this.drawRPGQuestPanel();
+        } else {
+            this.destroyRPGQuestPanel();
+        }
+    }
+
+    private closeAllRPGPanels(): void {
+        this.rpgInventoryOpen = false;
+        this.rpgQuestOpen = false;
+        this.rpgNpcDialogActive = false;
+        this.rpgShopOpen = false;
+        this.destroyRPGInventory();
+        this.destroyRPGQuestPanel();
+        this.destroyRPGNpcDialog();
+        this.destroyRPGShop();
+    }
+
+    private closeAllRPGPanelsExcept(panel: string): void {
+        if (panel !== 'inventory') { this.rpgInventoryOpen = false; this.destroyRPGInventory(); }
+        if (panel !== 'quest') { this.rpgQuestOpen = false; this.destroyRPGQuestPanel(); }
+        if (panel !== 'npcDialog') { this.rpgNpcDialogActive = false; this.destroyRPGNpcDialog(); }
+        if (panel !== 'shop') { this.rpgShopOpen = false; this.destroyRPGShop(); }
+    }
+
+    private handleRPGInteract(): void {
+        if (this.rpgNpcDialogActive) {
+            this.closeRPGNpcDialog();
+            return;
+        }
+        if (this.rpgShopOpen) {
+            this.closeRPGShop();
+            return;
+        }
+
+        if (!this.CurrentPlayer) return;
+        const px = this.CurrentPlayer.x;
+        const py = this.CurrentPlayer.y;
+
+        for (const npc of this.rpgNpcSprites) {
+            const dx = px - npc.sprite.x;
+            const dy = py - npc.sprite.y;
+            if (dx * dx + dy * dy < 60 * 60) {
+                if (npc.data.shopItems) {
+                    this.openRPGShop(npc.data);
+                } else {
+                    this.showRPGNpcDialog(npc.data);
+                }
+                return;
+            }
+        }
+    }
+
+    private closeRPGNpcDialog(): void {
+        this.rpgNpcDialogActive = false;
+        this.rpgNpcDialogData = null;
+        this.destroyRPGNpcDialog();
+    }
+
+    private closeRPGShop(): void {
+        this.rpgShopOpen = false;
+        this.rpgShopNpc = null;
+        this.destroyRPGShop();
+    }
+
+    private useRPGInventoryItem(index: number): void {
+        const rpg = this.CurrentPlayer.rpgManager;
+        if (!rpg) return;
+
+        const inventory = rpg.getInventory();
+        if (index >= inventory.length) return;
+
+        const slot = inventory[index];
+        const item = RPG_ITEMS[slot.itemId];
+        if (!item || item.category !== 'consumable') {
+            this.addRPGMessage('Cannot use this item!', '#ff6666');
+            return;
+        }
+
+        if (item.hp) {
+            const healed = rpg.heal(item.hp);
+            this.addRPGMessage(`Used ${item.name}: +${healed} HP`, '#88ff88');
+        }
+        if (item.mp) {
+            const healed = rpg.healMana(item.mp);
+            this.addRPGMessage(`Used ${item.name}: +${healed} MP`, '#8888ff');
+        }
+
+        rpg.removeItem(slot.itemId, 1);
+        rpg.save();
+        this.drawRPGInventory();
+    }
+
+    private unequipRPGSlot(slotIndex: number): void {
+        const rpg = this.CurrentPlayer.rpgManager;
+        if (!rpg) return;
+
+        const eqSlots = ['weapon', 'armor', 'helmet', 'legs', 'boots', 'shield'];
+        const slotName = eqSlots[slotIndex];
+        if (!slotName) return;
+
+        const equipment = rpg.getEquipment();
+        if (!equipment[slotName]) {
+            this.addRPGMessage('Nothing equipped in this slot!', '#ff6666');
+            return;
+        }
+
+        const itemId = rpg.unequip(slotName);
+        if (itemId) {
+            if (!rpg.addItem(itemId)) {
+                this.addRPGMessage('Inventory full! Cannot unequip.', '#ff6666');
+                rpg.equip(itemId, slotName);
+                return;
+            }
+            const item = RPG_ITEMS[itemId];
+            this.addRPGMessage(`Unequipped ${item?.name || itemId}`, '#FFD700');
+            rpg.save();
+        }
+        this.drawRPGInventory();
+    }
+
+    private drawRPGInventory(): void {
+        this.destroyRPGInventory();
+
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const h = cam.height;
+        const sc = Math.min(w / 800, h / 600);
+
+        if (!this.rpgInventoryGraphics) {
+            this.rpgInventoryGraphics = this.add.graphics();
+            this.rpgInventoryGraphics.setScrollFactor(0).setDepth(3000);
+        }
+
+        const g = this.rpgInventoryGraphics;
+        g.setVisible(true);
+        g.clear();
+
+        const panelW = 420 * sc;
+        const panelH = 340 * sc;
+        const panelX = (w - panelW) / 2;
+        const panelY = (h - panelH) / 2;
+
+        g.fillStyle(0x000000, 0.88);
+        g.fillRect(panelX, panelY, panelW, panelH);
+        g.lineStyle(2, 0x8B7355);
+        g.strokeRect(panelX, panelY, panelW, panelH);
+
+        const title = this.add.text(w / 2, panelY + 12, 'Inventory', {
+            fontSize: `${14 * sc}px monospace`, color: '#FFD700',
+        }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(3001);
+        this.rpgInventoryTexts.push(title);
+
+        const rpg = this.CurrentPlayer.rpgManager;
+        if (!rpg) return;
+
+        const inventory = rpg.getInventory();
+        const equipment = rpg.getEquipment();
+
+        const gridX = panelX + 12;
+        const gridY = panelY + 35;
+        const slotSize = 42 * sc;
+        const cols = 4;
+
+        const itemsLabel = this.add.text(gridX, gridY - 2, 'Items:', {
+            fontSize: `${9 * sc}px monospace`, color: '#cccccc',
+        }).setScrollFactor(0).setDepth(3001);
+        this.rpgInventoryTexts.push(itemsLabel);
+
+        for (let i = 0; i < Math.min(inventory.length, 16); i++) {
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const sx = gridX + col * (slotSize + 4);
+            const sy = gridY + 14 + row * (slotSize + 4);
+
+            g.fillStyle(0x222222, 0.9);
+            g.fillRect(sx, sy, slotSize, slotSize);
+            g.lineStyle(1, 0x555555);
+            g.strokeRect(sx, sy, slotSize, slotSize);
+
+            const item = RPG_ITEMS[inventory[i].itemId];
+            if (item) {
+                const abbrev = item.name.length > 6 ? item.name.substring(0, 5) + '.' : item.name;
+                const isConsumable = item.category === 'consumable';
+
+                const itemText = this.add.text(sx + slotSize / 2, sy + slotSize / 2 - 3, abbrev, {
+                    fontSize: `${7 * sc}px monospace`, color: isConsumable ? '#88ff88' : '#ffffff',
+                    wordWrap: { width: slotSize - 4 },
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(3001);
+                this.rpgInventoryTexts.push(itemText);
+
+                if (inventory[i].count > 1) {
+                    const countText = this.add.text(sx + slotSize - 2, sy + slotSize - 2, `x${inventory[i].count}`, {
+                        fontSize: `${7 * sc}px monospace`, color: '#FFD700',
+                    }).setOrigin(1, 1).setScrollFactor(0).setDepth(3001);
+                    this.rpgInventoryTexts.push(countText);
+                }
+            }
+
+            const keyText = this.add.text(sx + 2, sy + 1, `${i + 1}`, {
+                fontSize: `${7 * sc}px monospace`, color: '#888888',
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgInventoryTexts.push(keyText);
+        }
+
+        const eqX = gridX + cols * (slotSize + 4) + 12;
+        const eqY = gridY + 14;
+        const eqSlots = ['weapon', 'armor', 'helmet', 'legs', 'boots', 'shield'];
+        const eqLabels = ['Weapon', 'Armor', 'Helmet', 'Legs', 'Boots', 'Shield'];
+
+        const eqTitle = this.add.text(eqX, gridY - 2, 'Equipment:', {
+            fontSize: `${9 * sc}px monospace`, color: '#cccccc',
+        }).setScrollFactor(0).setDepth(3001);
+        this.rpgInventoryTexts.push(eqTitle);
+
+        for (let i = 0; i < eqSlots.length; i++) {
+            const sy = eqY + i * (slotSize + 4);
+            const equipped = equipment[eqSlots[i]];
+
+            g.fillStyle(0x222222, 0.9);
+            g.fillRect(eqX, sy, slotSize + 20 * sc, slotSize);
+            g.lineStyle(1, equipped ? 0x8B7355 : 0x444444);
+            g.strokeRect(eqX, sy, slotSize + 20 * sc, slotSize);
+
+            const slotText = this.add.text(eqX + 3, sy + 2, eqLabels[i], {
+                fontSize: `${7 * sc}px monospace`, color: '#888888',
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgInventoryTexts.push(slotText);
+
+            if (equipped) {
+                const item = RPG_ITEMS[equipped];
+                const name = item ? (item.name.length > 8 ? item.name.substring(0, 7) + '.' : item.name) : equipped;
+                const eqText = this.add.text(eqX + 3, sy + 15, name, {
+                    fontSize: `${7 * sc}px monospace`, color: '#88ff88',
+                }).setScrollFactor(0).setDepth(3001);
+                this.rpgInventoryTexts.push(eqText);
+            } else {
+                const emptyText = this.add.text(eqX + 3, sy + 15, 'Empty', {
+                    fontSize: `${7 * sc}px monospace`, color: '#555555',
+                }).setScrollFactor(0).setDepth(3001);
+                this.rpgInventoryTexts.push(emptyText);
+            }
+
+            const fKeyText = this.add.text(eqX + slotSize + 16 * sc, sy + slotSize / 2, `F${i + 1}`, {
+                fontSize: `${7 * sc}px monospace`, color: '#888888',
+            }).setOrigin(1, 0.5).setScrollFactor(0).setDepth(3001);
+            this.rpgInventoryTexts.push(fKeyText);
+        }
+
+        const helpText = this.add.text(w / 2, panelY + panelH - 14, '1-9: Use item | F1-F6: Unequip | I/Esc: Close', {
+            fontSize: `${8 * sc}px monospace`, color: '#888888',
+        }).setOrigin(0.5, 1).setScrollFactor(0).setDepth(3001);
+        this.rpgInventoryTexts.push(helpText);
+    }
+
+    private destroyRPGInventory(): void {
+        if (this.rpgInventoryGraphics) {
+            this.rpgInventoryGraphics.clear();
+            this.rpgInventoryGraphics.setVisible(false);
+        }
+        for (const t of this.rpgInventoryTexts) t.destroy();
+        this.rpgInventoryTexts = [];
+    }
+
+    private drawRPGQuestPanel(): void {
+        this.destroyRPGQuestPanel();
+
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const h = cam.height;
+        const sc = Math.min(w / 800, h / 600);
+
+        if (!this.rpgQuestGraphics) {
+            this.rpgQuestGraphics = this.add.graphics();
+            this.rpgQuestGraphics.setScrollFactor(0).setDepth(3000);
+        }
+
+        const g = this.rpgQuestGraphics;
+        g.setVisible(true);
+        g.clear();
+
+        const panelW = 380 * sc;
+        const panelH = 320 * sc;
+        const panelX = (w - panelW) / 2;
+        const panelY = (h - panelH) / 2;
+
+        g.fillStyle(0x000000, 0.88);
+        g.fillRect(panelX, panelY, panelW, panelH);
+        g.lineStyle(2, 0x8B7355);
+        g.strokeRect(panelX, panelY, panelW, panelH);
+
+        const title = this.add.text(w / 2, panelY + 12, 'Quests', {
+            fontSize: `${14 * sc}px monospace`, color: '#FFD700',
+        }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(3001);
+        this.rpgQuestTexts.push(title);
+
+        const saveData = this.getRPGSaveData();
+        if (!saveData) {
+            const noQuests = this.add.text(w / 2, panelY + panelH / 2, 'No quest data found', {
+                fontSize: `${10 * sc}px monospace`, color: '#888888',
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(3001);
+            this.rpgQuestTexts.push(noQuests);
+            return;
+        }
+
+        let yOff = panelY + 38;
+
+        const activeLabel = this.add.text(panelX + 12, yOff, 'Active Quests:', {
+            fontSize: `${10 * sc}px monospace`, color: '#FFD700',
+        }).setScrollFactor(0).setDepth(3001);
+        this.rpgQuestTexts.push(activeLabel);
+        yOff += 18;
+
+        if (saveData.activeQuests.length === 0) {
+            const noActive = this.add.text(panelX + 12, yOff, '  No active quests', {
+                fontSize: `${9 * sc}px monospace`, color: '#666666',
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgQuestTexts.push(noActive);
+            yOff += 16;
+        }
+
+        for (const questId of saveData.activeQuests) {
+            const quest = RPG_QUESTS.find(q => q.id === questId);
+            if (!quest) continue;
+
+            const progress = saveData.questProgress[questId] || 0;
+
+            const questName = this.add.text(panelX + 12, yOff, quest.name, {
+                fontSize: `${9 * sc}px monospace`, color: '#ffffff',
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgQuestTexts.push(questName);
+            yOff += 14;
+
+            const progressText = this.add.text(panelX + 20, yOff, `${progress}/${quest.count} ${quest.target}s killed`, {
+                fontSize: `${8 * sc}px monospace`, color: '#aaaaaa',
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgQuestTexts.push(progressText);
+
+            const barW = 150 * sc;
+            const barH = 6 * sc;
+            const barX = panelX + 20;
+            const barY = yOff + 12;
+            g.fillStyle(0x333333);
+            g.fillRect(barX, barY, barW, barH);
+            const ratio = Math.min(1, progress / quest.count);
+            g.fillStyle(0xffa500);
+            g.fillRect(barX, barY, barW * ratio, barH);
+
+            yOff += 22;
+
+            const reward = this.add.text(panelX + 20, yOff, `Reward: ${quest.rewardXp} XP, ${quest.rewardGold} Gold`, {
+                fontSize: `${7 * sc}px monospace`, color: '#888888',
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgQuestTexts.push(reward);
+            yOff += 18;
+        }
+
+        yOff += 8;
+
+        const completedLabel = this.add.text(panelX + 12, yOff, 'Completed Quests:', {
+            fontSize: `${10 * sc}px monospace`, color: '#8B7355',
+        }).setScrollFactor(0).setDepth(3001);
+        this.rpgQuestTexts.push(completedLabel);
+        yOff += 18;
+
+        if (saveData.completedQuests.length === 0) {
+            const noCompleted = this.add.text(panelX + 12, yOff, '  No completed quests', {
+                fontSize: `${9 * sc}px monospace`, color: '#666666',
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgQuestTexts.push(noCompleted);
+        }
+
+        for (const questId of saveData.completedQuests) {
+            const quest = RPG_QUESTS.find(q => q.id === questId);
+            if (!quest) continue;
+
+            const compText = this.add.text(panelX + 12, yOff, `${quest.name} (done)`, {
+                fontSize: `${9 * sc}px monospace`, color: '#668866',
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgQuestTexts.push(compText);
+            yOff += 14;
+        }
+
+        const helpText = this.add.text(w / 2, panelY + panelH - 14, 'Q/Esc: Close', {
+            fontSize: `${8 * sc}px monospace`, color: '#888888',
+        }).setOrigin(0.5, 1).setScrollFactor(0).setDepth(3001);
+        this.rpgQuestTexts.push(helpText);
+    }
+
+    private destroyRPGQuestPanel(): void {
+        if (this.rpgQuestGraphics) {
+            this.rpgQuestGraphics.clear();
+            this.rpgQuestGraphics.setVisible(false);
+        }
+        for (const t of this.rpgQuestTexts) t.destroy();
+        this.rpgQuestTexts = [];
+    }
+
+    private showRPGNpcDialog(npcData: { name: string; text: string; questId?: string; shopItems?: string[] }): void {
+        this.rpgNpcDialogActive = true;
+        this.rpgNpcDialogData = npcData;
+
+        if (npcData.questId) {
+            const rpg = this.CurrentPlayer.rpgManager;
+            if (rpg) {
+                const saveData = this.getRPGSaveData();
+                const alreadyActive = saveData?.activeQuests.includes(npcData.questId);
+                const alreadyCompleted = saveData?.completedQuests.includes(npcData.questId);
+
+                if (!alreadyActive && !alreadyCompleted) {
+                    if (rpg.acceptQuest(npcData.questId)) {
+                        rpg.save();
+                        const quest = RPG_QUESTS.find(q => q.id === npcData.questId);
+                        if (quest) {
+                            this.addRPGMessage(`Quest accepted: ${quest.name}`, '#FFD700');
+                        }
+                    }
+                }
+            }
+        }
+
+        this.drawRPGNpcDialog();
+    }
+
+    private drawRPGNpcDialog(): void {
+        this.destroyRPGNpcDialog();
+
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const h = cam.height;
+        const sc = Math.min(w / 800, h / 600);
+
+        if (!this.rpgNpcDialogGraphics) {
+            this.rpgNpcDialogGraphics = this.add.graphics();
+            this.rpgNpcDialogGraphics.setScrollFactor(0).setDepth(3000);
+        }
+
+        const g = this.rpgNpcDialogGraphics;
+        g.setVisible(true);
+        g.clear();
+
+        const panelH = 80 * sc;
+        const panelW = Math.min(w - 40, 500) * sc;
+        const panelX = (w - panelW) / 2;
+        const panelY = h - panelH - 20;
+
+        g.fillStyle(0x000000, 0.88);
+        g.fillRect(panelX, panelY, panelW, panelH);
+        g.lineStyle(2, 0x8B7355);
+        g.strokeRect(panelX, panelY, panelW, panelH);
+
+        if (!this.rpgNpcDialogData) return;
+
+        const nameText = this.add.text(panelX + 12, panelY + 8, this.rpgNpcDialogData.name, {
+            fontSize: `${12 * sc}px monospace`, color: '#FFD700',
+        }).setScrollFactor(0).setDepth(3001);
+        this.rpgNpcDialogTexts.push(nameText);
+
+        const dialogText = this.add.text(panelX + 12, panelY + 26, this.rpgNpcDialogData.text, {
+            fontSize: `${9 * sc}px monospace`, color: '#ffffff',
+            wordWrap: { width: panelW - 24 },
+        }).setScrollFactor(0).setDepth(3001);
+        this.rpgNpcDialogTexts.push(dialogText);
+
+        const hintText = this.add.text(panelX + panelW - 12, panelY + panelH - 10, 'E/Space to close', {
+            fontSize: `${7 * sc}px monospace`, color: '#888888',
+        }).setOrigin(1, 1).setScrollFactor(0).setDepth(3001);
+        this.rpgNpcDialogTexts.push(hintText);
+    }
+
+    private destroyRPGNpcDialog(): void {
+        if (this.rpgNpcDialogGraphics) {
+            this.rpgNpcDialogGraphics.clear();
+            this.rpgNpcDialogGraphics.setVisible(false);
+        }
+        for (const t of this.rpgNpcDialogTexts) t.destroy();
+        this.rpgNpcDialogTexts = [];
+    }
+
+    private openRPGShop(npcData: { name: string; text: string; questId?: string; shopItems?: string[] }): void {
+        this.rpgShopOpen = true;
+        this.rpgShopNpc = { name: npcData.name, items: npcData.shopItems || [] };
+        this.drawRPGShop();
+    }
+
+    private drawRPGShop(): void {
+        this.destroyRPGShop();
+
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const h = cam.height;
+        const sc = Math.min(w / 800, h / 600);
+
+        if (!this.rpgShopGraphics) {
+            this.rpgShopGraphics = this.add.graphics();
+            this.rpgShopGraphics.setScrollFactor(0).setDepth(3000);
+        }
+
+        const g = this.rpgShopGraphics;
+        g.setVisible(true);
+        g.clear();
+
+        const itemCount = this.rpgShopNpc!.items.length;
+        const panelW = 350 * sc;
+        const panelH = (50 + itemCount * 30 + 30) * sc;
+        const panelX = (w - panelW) / 2;
+        const panelY = (h - panelH) / 2;
+
+        g.fillStyle(0x000000, 0.88);
+        g.fillRect(panelX, panelY, panelW, panelH);
+        g.lineStyle(2, 0x8B7355);
+        g.strokeRect(panelX, panelY, panelW, panelH);
+
+        const title = this.add.text(w / 2, panelY + 10, `${this.rpgShopNpc!.name}'s Shop`, {
+            fontSize: `${12 * sc}px monospace`, color: '#FFD700',
+        }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(3001);
+        this.rpgShopTexts.push(title);
+
+        const rpg = this.CurrentPlayer.rpgManager;
+        const gold = rpg ? rpg.getStats().gold : 0;
+
+        const goldText = this.add.text(w / 2, panelY + 30, `Your Gold: ${gold}`, {
+            fontSize: `${9 * sc}px monospace`, color: '#FFD700',
+        }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(3001);
+        this.rpgShopTexts.push(goldText);
+
+        let yOff = panelY + 50;
+
+        for (let i = 0; i < this.rpgShopNpc!.items.length; i++) {
+            const itemId = this.rpgShopNpc!.items[i];
+            const item = RPG_ITEMS[itemId];
+            if (!item) continue;
+
+            const canAfford = gold >= item.price;
+            const color = canAfford ? '#ffffff' : '#666666';
+
+            const itemText = this.add.text(panelX + 12, yOff, `${i + 1}. ${item.name}`, {
+                fontSize: `${9 * sc}px monospace`, color,
+            }).setScrollFactor(0).setDepth(3001);
+            this.rpgShopTexts.push(itemText);
+
+            const priceText = this.add.text(panelX + panelW - 12, yOff, `${item.price}g`, {
+                fontSize: `${9 * sc}px monospace`, color: canAfford ? '#FFD700' : '#663300',
+            }).setOrigin(1, 0).setScrollFactor(0).setDepth(3001);
+            this.rpgShopTexts.push(priceText);
+
+            let statsStr = '';
+            if (item.attack) statsStr += `ATK:${item.attack} `;
+            if (item.defense) statsStr += `DEF:${item.defense} `;
+            if (item.hp) statsStr += `HP:${item.hp} `;
+            if (item.mp) statsStr += `MP:${item.mp} `;
+
+            if (statsStr) {
+                const statText = this.add.text(panelX + 24, yOff + 12, statsStr.trim(), {
+                    fontSize: `${7 * sc}px monospace`, color: '#888888',
+                }).setScrollFactor(0).setDepth(3001);
+                this.rpgShopTexts.push(statText);
+            }
+
+            yOff += 30;
+        }
+
+        const helpText = this.add.text(w / 2, panelY + panelH - 10, '1-9: Buy | Esc: Close', {
+            fontSize: `${8 * sc}px monospace`, color: '#888888',
+        }).setOrigin(0.5, 1).setScrollFactor(0).setDepth(3001);
+        this.rpgShopTexts.push(helpText);
+    }
+
+    private buyRPGShopItem(index: number): void {
+        const rpg = this.CurrentPlayer.rpgManager;
+        if (!rpg || !this.rpgShopNpc) return;
+
+        if (index >= this.rpgShopNpc.items.length) return;
+
+        const itemId = this.rpgShopNpc.items[index];
+        const item = RPG_ITEMS[itemId];
+        if (!item) return;
+
+        const stats = rpg.getStats();
+        if (stats.gold < item.price) {
+            this.addRPGMessage('Not enough gold!', '#ff6666');
+            return;
+        }
+
+        if (!rpg.addItem(itemId)) {
+            this.addRPGMessage('Inventory full!', '#ff6666');
+            return;
+        }
+
+        stats.gold -= item.price;
+        rpg.save();
+        this.addRPGMessage(`Bought ${item.name} for ${item.price}g`, '#FFD700');
+        this.drawRPGShop();
+    }
+
+    private destroyRPGShop(): void {
+        if (this.rpgShopGraphics) {
+            this.rpgShopGraphics.clear();
+            this.rpgShopGraphics.setVisible(false);
+        }
+        for (const t of this.rpgShopTexts) t.destroy();
+        this.rpgShopTexts = [];
+    }
+
+    private updateRPGMessageLog(): void {
+        const now = this.currentTick;
+        this.rpgMessageLog = this.rpgMessageLog.filter(m => now - m.time < 4000);
+
+        if (this.rpgMessageLogGraphics) this.rpgMessageLogGraphics.clear();
+        for (const t of this.rpgMessageLogTexts) t.destroy();
+        this.rpgMessageLogTexts = [];
+
+        if (this.rpgMessageLog.length === 0) return;
+
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const h = cam.height;
+        const sc = Math.min(w / 800, h / 600);
+
+        if (!this.rpgMessageLogGraphics) {
+            this.rpgMessageLogGraphics = this.add.graphics();
+            this.rpgMessageLogGraphics.setScrollFactor(0).setDepth(2500);
+        }
+
+        const g = this.rpgMessageLogGraphics;
+        g.clear();
+
+        const visibleMessages = this.rpgMessageLog.slice(-6);
+        const lineHeight = 14 * sc;
+        const panelH = visibleMessages.length * lineHeight + 8;
+        const panelW = 300 * sc;
+        const panelX = 8;
+        const panelY = h - panelH - 8;
+
+        g.fillStyle(0x000000, 0.5);
+        g.fillRect(panelX, panelY, panelW, panelH);
+
+        for (let i = 0; i < visibleMessages.length; i++) {
+            const msg = visibleMessages[i];
+            const age = now - msg.time;
+            const alpha = Math.max(0, 1 - age / 4000);
+
+            const text = this.add.text(panelX + 6, panelY + 4 + i * lineHeight, msg.text, {
+                fontSize: `${8 * sc}px monospace`, color: msg.color,
+            }).setScrollFactor(0).setDepth(2501).setAlpha(alpha);
+            this.rpgMessageLogTexts.push(text);
+        }
+    }
+
+    // ============ RPG SAVE/RESPAWN/DEATH METHODS ============
+
+    private performRPGSave(): void {
+        if (!this.CurrentPlayer) return;
+        this.CurrentPlayer.rpgSave();
+        this.addRPGMessage('Game Saved!', '#88ff88');
+        this.showRPGSaveMessage();
+    }
+
+    private showRPGSaveMessage(): void {
+        this.hideRPGSaveMessage();
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const sc = Math.min(w / 800, cam.height / 600);
+
+        if (!this.rpgSaveMessageGraphics) {
+            this.rpgSaveMessageGraphics = this.add.graphics();
+            this.rpgSaveMessageGraphics.setScrollFactor(0).setDepth(5000);
+        }
+        const g = this.rpgSaveMessageGraphics;
+        g.clear();
+        g.fillStyle(0x000000, 0.7);
+        const msgW = 200 * sc;
+        const msgH = 40 * sc;
+        g.fillRect((w - msgW) / 2, 10, msgW, msgH);
+        g.lineStyle(2, 0x88ff88);
+        g.strokeRect((w - msgW) / 2, 10, msgW, msgH);
+
+        this.rpgSaveMessageText = this.add.text(w / 2, 10 + msgH / 2, 'Game Saved!', {
+            fontSize: `${14 * sc}px monospace`,
+            color: '#88ff88',
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(5001);
+        this.rpgSaveMessageTimer = 2000;
+    }
+
+    private hideRPGSaveMessage(): void {
+        if (this.rpgSaveMessageGraphics) {
+            this.rpgSaveMessageGraphics.clear();
+        }
+        if (this.rpgSaveMessageText) {
+            this.rpgSaveMessageText.destroy();
+            this.rpgSaveMessageText = undefined;
+        }
+    }
+
+    private showRPGDeathOverlay(): void {
+        if (this.rpgDeathOverlayActive) return;
+        this.rpgDeathOverlayActive = true;
+        this.rpgDeathTimer = 0;
+
+        const cam = this.cameras.main;
+        const w = cam.width;
+        const h = cam.height;
+        const sc = Math.min(w / 800, h / 600);
+
+        if (!this.rpgDeathOverlayGraphics) {
+            this.rpgDeathOverlayGraphics = this.add.graphics();
+            this.rpgDeathOverlayGraphics.setScrollFactor(0).setDepth(4000);
+        }
+        const g = this.rpgDeathOverlayGraphics;
+        g.clear();
+        g.fillStyle(0x000000, 0.75);
+        g.fillRect(0, 0, w, h);
+
+        this.rpgDeathOverlayTexts.forEach(t => t.destroy());
+        this.rpgDeathOverlayTexts = [];
+
+        const title = this.add.text(w / 2, h * 0.35, 'YOU DIED', {
+            fontSize: `${36 * sc}px monospace`,
+            color: '#ff0000',
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(4001);
+        this.rpgDeathOverlayTexts.push(title);
+
+        const sub = this.add.text(w / 2, h * 0.45, 'You will respawn at the Temple in 10 seconds...', {
+            fontSize: `${12 * sc}px monospace`,
+            color: '#cccccc',
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(4001);
+        this.rpgDeathOverlayTexts.push(sub);
+
+        const hpLost = this.add.text(w / 2, h * 0.52, '20% of your gold was lost.', {
+            fontSize: `${10 * sc}px monospace`,
+            color: '#ff8888',
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(4001);
+        this.rpgDeathOverlayTexts.push(hpLost);
+    }
+
+    private hideRPGDeathOverlay(): void {
+        this.rpgDeathOverlayActive = false;
+        if (this.rpgDeathOverlayGraphics) {
+            this.rpgDeathOverlayGraphics.clear();
+        }
+        for (const t of this.rpgDeathOverlayTexts) t.destroy();
+        this.rpgDeathOverlayTexts = [];
+    }
+
+    private handleRPGRespawn(): void {
+        this.hideRPGDeathOverlay();
+        if (!this.CurrentPlayer) return;
+
+        this.CurrentPlayer.rpgRespawn();
+        this.CurrentPlayer.rpgSave();
+
+        // Teleport player to temple position
+        const templeX = GameScene.TEMPLE_X;
+        const templeY = GameScene.TEMPLE_Y;
+        this.CurrentPlayer.setPosition(templeX, templeY);
+        this.CurrentPlayer.finishFollowingPath(true);
+
+        this.handleCurrentPlayerHasMovedEvent({
+            x: templeX,
+            y: templeY,
+            direction: this.CurrentPlayer.lastDirection,
+            moving: false,
+        });
+
+        this.addRPGMessage('You have been resurrected at the Temple.', '#88ff88');
     }
 
     private addConversationBubblesAffectedByPlayerMove(
@@ -4059,6 +5453,24 @@ ${escapedMessage}
             ...this.gameMapFrontWrapper.getActivatableEntities(),
         ]);
         this.activatablesManager.deduceSelectedActivatableObjectByDistance();
+
+        // RPG exit zone detection
+        const mapPixelW = this.Map.widthInPixels;
+        const mapPixelH = this.Map.heightInPixels;
+        const edgeMargin = 96;
+        if (event.x < edgeMargin) {
+            console.log('Exit to Forest (West)');
+            this.addRPGMessage('Exit to Forest (West)', '#ffaa00');
+        } else if (event.x > mapPixelW - edgeMargin) {
+            console.log('Exit to Forest (East)');
+            this.addRPGMessage('Exit to Forest (East)', '#ffaa00');
+        } else if (event.y < edgeMargin) {
+            console.log('Exit to Forest (North)');
+            this.addRPGMessage('Exit to Forest (North)', '#ffaa00');
+        } else if (event.y > mapPixelH - edgeMargin) {
+            console.log('Exit to Forest (South)');
+            this.addRPGMessage('Exit to Forest (South)', '#ffaa00');
+        }
 
         // Call movement ended callbacks if movement just ended
         for (const cb of this.onPlayerMovementEndedCallbacks) {
