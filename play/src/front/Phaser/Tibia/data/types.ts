@@ -4,6 +4,8 @@ export type EquipmentSlot = 'helmet' | 'armor' | 'legs' | 'boots' | 'weapon' | '
 
 export type ItemCategory = 'weapon' | 'armor' | 'helmet' | 'legs' | 'boots' | 'shield' | 'ring' | 'amulet' | 'consumable' | 'quest' | 'money' | 'other'
 
+export type SpellElement = 'physical' | 'fire' | 'ice' | 'energy' | 'earth' | 'holy' | 'death'
+
 export interface ItemData {
     id: string
     name: string
@@ -18,6 +20,8 @@ export interface ItemData {
     magicLevel?: number
     hp?: number
     mp?: number
+    elementalAttack?: Partial<Record<SpellElement, number>>
+    elementalDefense?: Partial<Record<SpellElement, number>>
     buyPrice?: number
     sellPrice?: number
     requiredLevel?: number
@@ -78,4 +82,7 @@ export interface SaveData {
     equipment: Partial<Record<EquipmentSlot, string>>
     quests: { active: string[]; completed: string[]; progress: Record<string, number[]> }
     currentMap: string
+    spells?: { knownSpells: string[]; spellSlots: (string | null)[] }
+    trade?: { reputation: Record<string, number>; priceModifier: number }
+    deathPenalty?: { deathHistory: any[]; consecutiveDeaths: number }
 }

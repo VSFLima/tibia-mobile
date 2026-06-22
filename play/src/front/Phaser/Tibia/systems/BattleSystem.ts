@@ -1,5 +1,5 @@
 import type { PlayerStats } from './PlayerStats'
-import type { MonsterData } from '../data/types'
+import type { MonsterData, SpellElement } from '../data/types'
 
 export interface BattleMonster {
     data: MonsterData
@@ -174,29 +174,49 @@ export class BattleSystem {
 
         const ml = player.totalMagicLevel
         let damage = 0
+        let element: SpellElement = 'physical'
 
         switch (skill) {
             case 'fire_wave':
                 damage = 20 + ml * 8 + Math.floor(Math.random() * 20)
+                element = 'fire'
                 break
             case 'energy_wave':
                 damage = 25 + ml * 10 + Math.floor(Math.random() * 25)
+                element = 'energy'
                 break
             case 'ice_wave':
                 damage = 22 + ml * 9 + Math.floor(Math.random() * 22)
+                element = 'ice'
                 break
             case 'holy_smite':
                 damage = 30 + ml * 12 + Math.floor(Math.random() * 30)
+                element = 'holy'
                 break
             case 'death_strike':
                 damage = 35 + ml * 15 + Math.floor(Math.random() * 35)
+                element = 'death'
                 break
             default:
                 damage = 10 + ml * 5
         }
 
+        if (target.data.elements) {
+            const elementMult = target.data.elements[element] ?? 1.0
+            damage = Math.floor(damage * elementMult)
+            if (elementMult > 1.0) {
+                this.state.messages.push(`${target.data.name} é fraco contra ${element}!`)
+            } else if (elementMult < 1.0 && elementMult > 0) {
+                this.state.messages.push(`${target.data.name} é resistente a ${element}!`)
+            } else if (elementMult === 0) {
+                this.state.messages.push(`${target.data.name} é imune a ${element}!`)
+            }
+        }
+
+        damage = Math.max(1, damage)
+
         target.currentHp -= damage
-        this.state.messages.push(`Você usou ${skill} causando ${damage} de dano!`)
+        this.state.messages.push(`Você usou ${skill} causando ${damage} de dano ${element}!`)
 
         if (target.currentHp <= 0) {
             target.currentHp = 0
@@ -250,12 +270,35 @@ export class BattleSystem {
     private processEnemyTurn(dt: number, player: PlayerStats): void {
         if (!this.state) return
 
+        const playerResistances = player.elementalDefense
+
         for (const monster of this.state.monsters) {
             if (monster.state === 'dead') continue
 
             const baseDamage = monster.data.attack
             const variance = Math.floor(Math.random() * 4) - 1
-            const damage = Math.max(1, baseDamage + variance - Math.floor(player.totalDefense * 0.3))
+            let damage = Math.max(1, baseDamage + variance - Math.floor(player.totalDefense * 0.3))
+
+            if (monster.data.elements) {
+                let bestElement: SpellElement = 'physical'
+                let bestMult = 0
+                for (const [elem, mult] of Object.entries(monster.data.elements)) {
+                    if ((mult ?? 0) > bestMult) {
+                        bestMult = mult!
+                        bestElement = elem as SpellElement
+                    }
+                }
+                if (bestElement !== 'physical' && bestMult > 1.0) {
+                    damage = Math.floor(damage * bestMult * 0.3)
+                }
+            }
+
+            const resistance = playerResistances.physical ?? 0
+            if (resistance > 0) {
+                damage = Math.floor(damage * (1 - resistance / 100))
+            }
+
+            damage = Math.max(1, damage)
 
             this.state.playerHp = Math.max(0, this.state.playerHp - damage)
             player.hp = this.state.playerHp

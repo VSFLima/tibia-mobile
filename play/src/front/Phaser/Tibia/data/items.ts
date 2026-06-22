@@ -12,6 +12,7 @@ export const ITEMS: Record<string, ItemData> = {
         id: 'crystal_sword', name: 'Crystal Sword', description: 'Uma espada feita de cristal puro.',
         category: 'weapon', weight: 25, stackable: false, usable: false,
         attack: 35, defense: 12, speed: 1, magicLevel: 2,
+        elementalAttack: { ice: 1.15 },
         buyPrice: 12000, sellPrice: 6000, requiredLevel: 50, sprite: 'item_crystal_sword'
     },
     'bone_sword': {
@@ -36,6 +37,7 @@ export const ITEMS: Record<string, ItemData> = {
         id: 'fire_sword', name: 'Fire Sword', description: 'Uma espada que arde em chamas eternas.',
         category: 'weapon', weight: 24, stackable: false, usable: false,
         attack: 42, defense: 14, speed: 2, magicLevel: 3,
+        elementalAttack: { fire: 1.3 },
         buyPrice: 25000, sellPrice: 12000, requiredLevel: 70, sprite: 'item_fire_sword'
     },
 
@@ -44,6 +46,7 @@ export const ITEMS: Record<string, ItemData> = {
         id: 'magic_robe', name: 'Magic Robe', description: 'Uma túnica que amplifica o poder mágico.',
         category: 'armor', weight: 12, stackable: false, usable: false,
         defense: 8, magicLevel: 4,
+        elementalDefense: { fire: 0.05, ice: 0.05, energy: 0.05 },
         buyPrice: 6000, sellPrice: 3000, requiredLevel: 25, sprite: 'item_magic_robe'
     },
     'plate_armor': {
@@ -68,6 +71,7 @@ export const ITEMS: Record<string, ItemData> = {
         id: 'dragon_scale_armor', name: 'Dragon Scale Armor', description: 'Armadura feita de escamas de dragão.',
         category: 'armor', weight: 40, stackable: false, usable: false,
         defense: 22, speed: -3, magicLevel: 2,
+        elementalDefense: { fire: 0.15, physical: 0.10 },
         buyPrice: 50000, sellPrice: 25000, requiredLevel: 80, sprite: 'item_dragon_scale_armor'
     },
 
@@ -124,6 +128,7 @@ export const ITEMS: Record<string, ItemData> = {
         id: 'magic_shield', name: 'Magic Shield', description: 'Um escudo que absorve energia mágica.',
         category: 'shield', weight: 14, stackable: false, usable: false,
         defense: 12, magicLevel: 2,
+        elementalDefense: { energy: 0.10, holy: 0.05 },
         buyPrice: 5000, sellPrice: 2500, requiredLevel: 25, sprite: 'item_magic_shield'
     },
     'tower_shield': {

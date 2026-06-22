@@ -4,11 +4,17 @@ import { BattleSystem } from './systems/BattleSystem'
 import { QuestSystem } from './systems/QuestSystem'
 import { SaveSystem } from './systems/SaveSystem'
 import { SoundManager } from './systems/SoundManager'
+import { SpellSystem } from './systems/SpellSystem'
+import { ElementSystem } from './systems/ElementSystem'
+import { TradeSystem } from './systems/TradeSystem'
+import { DeathPenaltySystem } from './systems/DeathPenaltySystem'
+import { ExperienceSystem } from './systems/ExperienceSystem'
 import { TibiaUI } from './ui/TibiaUI'
 import { MonsterManager } from './entities/MonsterManager'
 import { ITEMS } from './data/items'
 import { MONSTERS } from './data/monsters'
 import { QUESTS } from './data/quests'
+import { getMap, isWalkable, getSpecialLocationAt, getTransitionAt, renderTile, renderSpecialLocation, renderMinimap } from './maps/MapData'
 import type { Direction, EquipmentSlot } from './data/types'
 
 export class TibiaGame {
@@ -18,6 +24,11 @@ export class TibiaGame {
     quests: QuestSystem
     saveSystem: SaveSystem
     sound: SoundManager
+    spells: SpellSystem
+    elements: ElementSystem
+    trade: TradeSystem
+    deathPenalty: DeathPenaltySystem
+    experience: ExperienceSystem
     ui: TibiaUI
     monsters: MonsterManager
     canvas: HTMLCanvasElement
@@ -43,6 +54,11 @@ export class TibiaGame {
         this.quests = new QuestSystem()
         this.saveSystem = new SaveSystem()
         this.sound = new SoundManager()
+        this.spells = new SpellSystem()
+        this.elements = new ElementSystem()
+        this.trade = new TradeSystem()
+        this.deathPenalty = new DeathPenaltySystem()
+        this.experience = new ExperienceSystem()
         this.ui = new TibiaUI(canvas)
         this.monsters = new MonsterManager()
 
@@ -136,7 +152,15 @@ export class TibiaGame {
                 this.battle.handleAction('run', this.player)
             } else if (selected === 'skill') {
                 const skills = ['fire_wave', 'energy_wave', 'ice_wave', 'holy_smite', 'death_strike']
-                this.battle.handleAction('skill', this.player, skills[this.battle.state.selectedSkill % skills.length])
+                const skillId = skills[this.battle.state.selectedSkill % skills.length]
+                const spellResult = this.spells.castSpell(skillId, this.player)
+                if (spellResult.success && spellResult.damage > 0) {
+                    this.battle.handleAction('skill', this.player, skillId)
+                } else if (spellResult.success && spellResult.heal > 0) {
+                    this.ui.addMessage(`Curou ${spellResult.heal} HP!`, '#4f4')
+                } else {
+                    this.ui.addMessage('Não foi possível usar a magia!', '#f44')
+                }
             } else if (selected === 'item') {
                 const consumables = this.inventory.getConsumables()
                 if (consumables.length > 0) {
@@ -182,43 +206,34 @@ export class TibiaGame {
         }
     }
 
+    private handleSpecialLocation(loc: { type: string; label: string; targetMap?: string; targetX?: number; targetY?: number }): void {
+        if (loc.type === 'temple') {
+            this.player.hp = this.player.maxHp
+            this.player.mp = this.player.maxMp
+            this.player.dead = false
+            this.player.respawnTimer = 0
+            this.sound.play('quest')
+            this.ui.addMessage(`❤️ Vida e mana restauradas em ${loc.label}`, '#4f4')
+        } else if (loc.type === 'shop') {
+            this.ui.addMessage(`🏪 ${loc.label} - Use E para interagir`, '#4af')
+        } else if (loc.type === 'stash') {
+            this.ui.addMessage(`📦 ${loc.label} - Use E para interagir`, '#aa8844')
+        } else if (loc.type === 'training_dummy') {
+            this.ui.addMessage(`🎯 ${loc.label} - Use ATK para treinar`, '#ff8844')
+        } else if (loc.type === 'portal' && loc.targetMap) {
+            this.changeMap(loc.targetMap)
+            this.player.x = loc.targetX ?? 25
+            this.player.y = loc.targetY ?? 25
+        } else if (loc.type === 'chest') {
+            this.ui.addMessage(`📦 ${loc.label} encontrado!`, '#FFD700')
+        }
+    }
+
     private spawnMapMonsters(): void {
         this.monsters.monsters = []
+        const mapDef = getMap(this.currentMap)
 
-        const mapSpawns: Record<string, { monsterId: string; x: number; y: number; count: number }[]> = {
-            thais: [
-                { monsterId: 'rat', x: 20, y: 25, count: 5 },
-                { monsterId: 'bug', x: 25, y: 20, count: 3 },
-                { monsterId: 'snake', x: 30, y: 30, count: 4 }
-            ],
-            forest: [
-                { monsterId: 'spider', x: 15, y: 15, count: 6 },
-                { monsterId: 'troll', x: 20, y: 20, count: 4 },
-                { monsterId: 'goblin', x: 25, y: 25, count: 3 },
-                { monsterId: 'wolf', x: 30, y: 18, count: 5 }
-            ],
-            dungeon: [
-                { monsterId: 'skeleton', x: 15, y: 15, count: 8 },
-                { monsterId: 'zombie', x: 20, y: 20, count: 6 },
-                { monsterId: 'orc', x: 25, y: 25, count: 5 },
-                { monsterId: 'orc_warrior', x: 30, y: 30, count: 3 }
-            ],
-            dragon_lair: [
-                { monsterId: 'dragon', x: 20, y: 20, count: 4 },
-                { monsterId: 'dragon_lord', x: 30, y: 30, count: 2 }
-            ],
-            demon_hall: [
-                { monsterId: 'minotaur', x: 15, y: 15, count: 5 },
-                { monsterId: 'minotaur_guard', x: 20, y: 20, count: 3 },
-                { monsterId: 'dark_knight', x: 25, y: 25, count: 2 },
-                { monsterId: 'hydra', x: 30, y: 30, count: 2 },
-                { monsterId: 'demon', x: 35, y: 35, count: 1 },
-                { monsterId: 'archdemon', x: 40, y: 40, count: 1 }
-            ]
-        }
-
-        const spawns = mapSpawns[this.currentMap] ?? mapSpawns.thais
-        for (const spawn of spawns) {
+        for (const spawn of mapDef.spawns) {
             const data = MONSTERS[spawn.monsterId]
             if (data) {
                 this.monsters.spawnGroup(data, spawn.x, spawn.y, spawn.count)
@@ -238,12 +253,13 @@ export class TibiaGame {
         this.ui.update(dt)
         this.quests.update(dt)
         this.player.update(dt)
+        this.spells.update(dt)
+        this.elements.calculatePlayerResistances(this.player.elementalDefense)
     }
 
     private updateExploration(dt: number): void {
         if (this.player.dead) return
 
-        // Movement
         let dx = 0, dy = 0
         if (this.keys['ArrowUp'] || this.keys['w'] || this.keys['W'] || this.touchDirection === 'up') dy = -1
         if (this.keys['ArrowDown'] || this.keys['s'] || this.keys['S'] || this.touchDirection === 'down') dy = 1
@@ -253,9 +269,9 @@ export class TibiaGame {
         if (!this.player.moving && (dx !== 0 || dy !== 0)) {
             const nx = this.player.x + dx
             const ny = this.player.y + dy
+            const mapDef = getMap(this.currentMap)
 
-            // Simple boundary check
-            if (nx >= 0 && nx < 50 && ny >= 0 && ny < 50) {
+            if (isWalkable(mapDef, nx, ny)) {
                 this.player.x = nx
                 this.player.y = ny
                 this.player.moving = true
@@ -265,6 +281,22 @@ export class TibiaGame {
 
                 if (dx !== 0) this.player.direction = dx > 0 ? 'right' : 'left'
                 if (dy !== 0) this.player.direction = dy > 0 ? 'down' : 'up'
+
+                const transition = getTransitionAt(mapDef, nx, ny)
+                if (transition) {
+                    if (transition.requiredLevel && this.player.level < transition.requiredLevel) {
+                        this.ui.addMessage(`Nível ${transition.requiredLevel} necessário!`, '#f44')
+                    } else {
+                        this.changeMap(transition.toMap)
+                        this.player.x = transition.toX
+                        this.player.y = transition.toY
+                    }
+                }
+
+                const specialLoc = getSpecialLocationAt(mapDef, nx, ny)
+                if (specialLoc && specialLoc.interactable) {
+                    this.handleSpecialLocation(specialLoc)
+                }
             }
         }
 
@@ -302,7 +334,22 @@ export class TibiaGame {
 
         if (result) {
             if (result.won) {
-                const levelsGained = this.player.gainXp(result.xp)
+                const monsterDataList = this.battle.getLastMonsterTypes().map(id => MONSTERS[id]).filter(Boolean)
+                let totalLevelsGained = 0
+                let totalFinalXp = 0
+
+                for (const monsterData of monsterDataList) {
+                    const xpResult = this.experience.calculateXpGain(monsterData!, this.player)
+                    totalLevelsGained += xpResult.levelsGained
+                    totalFinalXp += xpResult.finalXp
+                }
+
+                if (monsterDataList.length === 0) {
+                    const levelsGained = this.player.gainXp(result.xp)
+                    totalLevelsGained = levelsGained
+                    totalFinalXp = result.xp
+                }
+
                 this.player.gold += result.gold
                 for (const itemId of result.loot) {
                     this.inventory.addItem(itemId)
@@ -337,15 +384,20 @@ export class TibiaGame {
                     }
                 }
 
-                this.ui.addMessage(`+${result.xp} XP | +${result.gold}g`, '#ffa500')
+                this.ui.addMessage(`+${totalFinalXp} XP | +${result.gold}g`, '#ffa500')
                 this.sound.play('victory')
 
-                if (levelsGained > 0) {
+                if (totalLevelsGained > 0) {
                     this.ui.addMessage(`⬆️ Nível ${this.player.level}!`, '#FFD700')
                     this.sound.play('levelup')
                 }
             } else {
                 this.player.die()
+                const penalty = this.deathPenalty.calculatePenalty(this.player, this.inventory, 'Unknown', this.currentMap)
+                const penaltyMessages = this.deathPenalty.formatPenaltyMessage(penalty)
+                for (const msg of penaltyMessages) {
+                    this.ui.addMessage(msg, '#f44')
+                }
                 this.sound.play('death')
                 this.ui.addMessage('☠️ Você morreu!', '#f44')
             }
@@ -401,67 +453,36 @@ export class TibiaGame {
     }
 
     private renderMap(scale: number): void {
+        const mapDef = getMap(this.currentMap)
         const tileSize = 32 * scale
         const offsetX = this.canvas.width / 2 - this.player.x * tileSize
         const offsetY = this.canvas.height / 2 - this.player.y * tileSize
 
-        // Draw grid
-        for (let x = -2; x < 30; x++) {
-            for (let y = -2; y < 22; y++) {
+        const viewStartX = Math.max(0, Math.floor(this.player.x - this.canvas.width / tileSize / 2) - 1)
+        const viewEndX = Math.min(mapDef.width, Math.ceil(this.player.x + this.canvas.width / tileSize / 2) + 1)
+        const viewStartY = Math.max(0, Math.floor(this.player.y - this.canvas.height / tileSize / 2) - 1)
+        const viewEndY = Math.min(mapDef.height, Math.ceil(this.player.y + this.canvas.height / tileSize / 2) + 1)
+
+        for (let y = viewStartY; y < viewEndY; y++) {
+            for (let x = viewStartX; x < viewEndX; x++) {
                 const sx = x * tileSize + offsetX
                 const sy = y * tileSize + offsetY
-
-                // Ground tile
-                const isGrass = (x + y) % 3 !== 0
-                this.ctx.fillStyle = isGrass ? '#1a3a1a' : '#2a4a2a'
-                this.ctx.fillRect(sx, sy, tileSize, tileSize)
-
-                // Random decorations
-                const hash = (x * 7 + y * 13) % 20
-                if (hash === 0) {
-                    this.ctx.fillStyle = '#3a5a3a'
-                    this.ctx.fillRect(sx + 8, sy + 4, 16, 24) // tree
-                    this.ctx.fillStyle = '#2a4a2a'
-                    this.ctx.fillRect(sx + 12, sy, 8, 8)
-                } else if (hash === 5) {
-                    this.ctx.fillStyle = '#4a3a2a'
-                    this.ctx.fillRect(sx + 12, sy + 12, 8, 8) // rock
-                } else if (hash === 10) {
-                    this.ctx.fillStyle = '#3a6a3a'
-                    this.ctx.fillRect(sx + 14, sy + 20, 4, 8) // flower stem
-                    this.ctx.fillStyle = '#ff6'
-                    this.ctx.fillRect(sx + 12, sy + 16, 8, 6) // flower
-                }
-
-                // Grid line
-                this.ctx.strokeStyle = 'rgba(50,70,50,0.3)'
+                renderTile(this.ctx, mapDef.tiles[y][x], sx, sy, tileSize)
+                this.ctx.strokeStyle = 'rgba(50,70,50,0.2)'
                 this.ctx.strokeRect(sx, sy, tileSize, tileSize)
             }
         }
 
-        // Map-specific decorations
-        if (this.currentMap === 'thais') {
-            // Draw buildings
-            this.drawBuilding(offsetX + 10 * tileSize, offsetY + 8 * tileSize, tileSize * 4, tileSize * 3, '#5a4a3a', 'Thais Temple')
-            this.drawBuilding(offsetX + 20 * tileSize, offsetY + 12 * tileSize, tileSize * 3, tileSize * 2, '#4a3a2a', 'Armory')
-        } else if (this.currentMap === 'dungeon') {
-            // Darker ground
-            this.ctx.fillStyle = 'rgba(0,0,0,0.3)'
+        if (mapDef.ambientColor !== 'rgba(0,0,0,0)') {
+            this.ctx.fillStyle = mapDef.ambientColor
             this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
         }
-    }
 
-    private drawBuilding(x: number, y: number, w: number, h: number, color: string, label: string): void {
-        this.ctx.fillStyle = color
-        this.ctx.fillRect(x, y, w, h)
-        this.ctx.strokeStyle = '#2a1a0a'
-        this.ctx.lineWidth = 2
-        this.ctx.strokeRect(x, y, w, h)
-        this.ctx.fillStyle = '#FFD700'
-        this.ctx.font = `${10 * Math.min(this.canvas.width / 800, this.canvas.height / 600)}px monospace`
-        this.ctx.textAlign = 'center'
-        this.ctx.fillText(label, x + w / 2, y - 5)
-        this.ctx.textAlign = 'left'
+        for (const loc of mapDef.specialLocations) {
+            renderSpecialLocation(this.ctx, loc, offsetX, offsetY, tileSize, scale)
+        }
+
+        renderMinimap(this.ctx, mapDef, this.player.x, this.player.y, 10, 10, 100)
     }
 
     private renderMonsters(scale: number): void {
@@ -607,7 +628,10 @@ export class TibiaGame {
     }
 
     saveGame(): void {
-        this.saveSystem.save(this.player, this.inventory, this.currentMap, this.quests)
+        this.saveSystem.save(
+            this.player, this.inventory, this.currentMap, this.quests,
+            this.spells, this.trade, this.deathPenalty
+        )
     }
 
     loadGame(): void {
@@ -618,6 +642,9 @@ export class TibiaGame {
             this.currentMap = save.currentMap || 'thais'
             this.quests.deserialize(save.quests)
             this.battle.setMap(this.currentMap)
+            if (save.spells) this.spells.deserialize(save.spells)
+            if (save.trade) this.trade.deserialize(save.trade)
+            if (save.deathPenalty) this.deathPenalty.deserialize(save.deathPenalty)
             this.ui.addMessage('Jogo carregado!', '#4f4')
         } else {
             this.ui.addMessage('Bem-vindo ao Tibia Mobile!', '#FFD700')

@@ -1,4 +1,4 @@
-import type { Direction, EquipmentSlot, SaveData } from '../data/types'
+import type { Direction, EquipmentSlot, SaveData, SpellElement } from '../data/types'
 import { ITEMS } from '../data/items'
 
 export class PlayerStats {
@@ -79,6 +79,23 @@ export class PlayerStats {
             }
         }
         return ml
+    }
+
+    get elementalDefense(): Record<SpellElement, number> {
+        const res: Record<SpellElement, number> = {
+            physical: 0, fire: 0, ice: 0, energy: 0, earth: 0, holy: 0, death: 0
+        }
+        for (const itemId of Object.values(this.equipment)) {
+            if (itemId) {
+                const item = ITEMS[itemId]
+                if (item?.elementalDefense) {
+                    for (const [element, value] of Object.entries(item.elementalDefense)) {
+                        res[element as SpellElement] = (res[element as SpellElement] ?? 0) + (value ?? 0)
+                    }
+                }
+            }
+        }
+        return res
     }
 
     takeDamage(amount: number): number {
