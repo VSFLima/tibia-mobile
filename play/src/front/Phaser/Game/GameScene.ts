@@ -1059,6 +1059,10 @@ export class GameScene extends DirtyScene {
                 tweenDurationMs: 250,
             });
         }
+
+        if (touchScreenManager.supportTouchScreen) {
+            this.createTouchActionButtons();
+        }
     }
 
     public getMapUrl(): string {
@@ -1066,6 +1070,128 @@ export class GameScene extends DirtyScene {
             throw new Error("Trying to access mapUrl before it was fetched");
         }
         return this.mapUrlFile;
+    }
+
+    private createTouchActionButtons(): void {
+        const cam = this.cameras.main;
+        const btnSize = 60;
+        const gap = 8;
+        const margin = 16;
+        const depth = 2000;
+
+        const createBtn = (x: number, y: number, color: number, label: string): Phaser.GameObjects.Container => {
+            const bg = this.add.graphics();
+            bg.fillStyle(color, 0.7);
+            bg.fillRoundedRect(-btnSize / 2, -btnSize / 2, btnSize, btnSize, 10);
+            bg.lineStyle(2, 0xffffff, 0.5);
+            bg.strokeRoundedRect(-btnSize / 2, -btnSize / 2, btnSize, btnSize, 10);
+
+            const text = this.add.text(0, 0, label, {
+                fontSize: '11px',
+                color: '#ffffff',
+                fontStyle: 'bold',
+                align: 'center',
+            }).setOrigin(0.5);
+
+            const container = this.add.container(x, y, [bg, text]);
+            container.setScrollFactor(0);
+            container.setSize(btnSize, btnSize);
+            container.setDepth(depth);
+            container.setAlpha(0.85);
+            container.setVisible(false);
+            return container;
+        };
+
+        const rightX = cam.width - margin - btnSize / 2;
+
+        // Top-down: Inventory, Quest, NPC  (non-combat buttons)
+        this.touchBtnInventory = createBtn(rightX, margin + btnSize / 2, 0xD4A017, 'INV');
+        this.touchBtnQuest = createBtn(rightX, margin + btnSize + gap + btnSize / 2, 0x8B5CF6, 'QST');
+        this.touchBtnNpc = createBtn(rightX, margin + (btnSize + gap) * 2 + btnSize / 2, 0x00BCD4, 'NPC');
+
+        // Bottom-up: Attack, Spell, Heal (combat buttons always visible)
+        const bottomY = cam.height - margin - btnSize / 2;
+        this.touchBtnAttack = createBtn(rightX, bottomY, 0xCC0000, 'ATK');
+        this.touchBtnSpell = createBtn(rightX, bottomY - btnSize - gap, 0x2196F3, 'MAG');
+        this.touchBtnHeal = createBtn(rightX, bottomY - (btnSize + gap) * 2, 0x4CAF50, 'HEAL');
+
+        // ATTACK handler
+        this.touchBtnAttack!.on('pointerdown', () => {
+            if (this.rpgBattleActive && this.rpgBattleAwaitingInput && this.rpgBattlePlayerTurn) {
+                this.processRPGAction(0);
+            } else if (!this.rpgBattleActive) {
+                this.findNearestMonsterAndAttack();
+            }
+        });
+
+        // SPELL handler
+        this.touchBtnSpell!.on('pointerdown', () => {
+            if (this.rpgBattleActive && this.rpgBattleAwaitingInput && this.rpgBattlePlayerTurn) {
+                this.processRPGAction(1);
+            }
+        });
+
+        // HEAL handler
+        this.touchBtnHeal!.on('pointerdown', () => {
+            if (this.rpgBattleActive && this.rpgBattleAwaitingInput && this.rpgBattlePlayerTurn) {
+                this.processRPGAction(2);
+            }
+        });
+
+        // INVENTORY handler
+        this.touchBtnInventory!.on('pointerdown', () => {
+            if (!this.rpgBattleActive) {
+                this.toggleRPGInventory();
+            }
+        });
+
+        // QUEST handler
+        this.touchBtnQuest!.on('pointerdown', () => {
+            if (!this.rpgBattleActive) {
+                this.toggleRPGQuestPanel();
+            }
+        });
+
+        // NPC handler
+        this.touchBtnNpc!.on('pointerdown', () => {
+            if (!this.rpgBattleActive) {
+                this.handleRPGInteract();
+            }
+        });
+    }
+
+    private findNearestMonsterAndAttack(): void {
+        if (!this.CurrentPlayer || this.rpgBattleActive) return;
+        const px = this.CurrentPlayer.x;
+        const py = this.CurrentPlayer.y;
+        let nearest: typeof this.rpgMonsters[0] | null = null;
+        let minDist = Infinity;
+        for (const m of this.rpgMonsters) {
+            if (m.currentHp <= 0) continue;
+            const dx = px - m.sprite.x;
+            const dy = py - m.sprite.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < minDist) {
+                minDist = dist;
+                nearest = m;
+            }
+        }
+        if (nearest && minDist < 150) {
+            this.startRPGBattle(nearest.data);
+        }
+    }
+
+    private updateTouchButtonsVisibility(): void {
+        if (!this.touchBtnAttack) return;
+        const inBattle = this.rpgBattleActive;
+        // Combat buttons always visible
+        this.touchBtnAttack.setVisible(true);
+        this.touchBtnSpell.setVisible(inBattle);
+        this.touchBtnHeal.setVisible(inBattle);
+        // Non-combat buttons hidden during battle
+        this.touchBtnInventory.setVisible(!inBattle);
+        this.touchBtnQuest.setVisible(!inBattle);
+        this.touchBtnNpc.setVisible(!inBattle);
     }
 
     public getEntityPermissions(): EntityPermissions {
@@ -1215,6 +1341,14 @@ export class GameScene extends DirtyScene {
         this.hideRPGSaveMessage();
         if (this.rpgDeathOverlayGraphics) { this.rpgDeathOverlayGraphics.destroy(); this.rpgDeathOverlayGraphics = undefined; }
         if (this.rpgSaveMessageGraphics) { this.rpgSaveMessageGraphics.destroy(); this.rpgSaveMessageGraphics = undefined; }
+
+        // Cleanup touch action buttons
+        this.touchBtnAttack?.destroy();
+        this.touchBtnSpell?.destroy();
+        this.touchBtnHeal?.destroy();
+        this.touchBtnInventory?.destroy();
+        this.touchBtnQuest?.destroy();
+        this.touchBtnNpc?.destroy();
 
         // make sure we restart own medias
         mediaManager.disableMyCamera();
@@ -1393,6 +1527,7 @@ export class GameScene extends DirtyScene {
             this.updateRPGMonsters(delta);
             this.checkRPGProximity();
             this.updateRPGMessageLog();
+            this.updateTouchButtonsVisibility();
             // Battle keyboard input
             if (this.rpgBattleActive && this.rpgBattleAwaitingInput && this.rpgBattlePlayerTurn) {
                 const kb = this.input.keyboard;
@@ -1672,6 +1807,14 @@ export class GameScene extends DirtyScene {
         label: Phaser.GameObjects.Text;
         data: { x: number; y: number; name: string; text: string; questId?: string; shopItems?: string[] };
     }[] = [];
+
+    // ============ RPG TOUCH BUTTONS ============
+    private touchBtnAttack?: Phaser.GameObjects.Container;
+    private touchBtnSpell?: Phaser.GameObjects.Container;
+    private touchBtnHeal?: Phaser.GameObjects.Container;
+    private touchBtnInventory?: Phaser.GameObjects.Container;
+    private touchBtnQuest?: Phaser.GameObjects.Container;
+    private touchBtnNpc?: Phaser.GameObjects.Container;
 
     // ============ RPG SAVE/LOAD & RESPAWN ============
     private rpgAutoSaveTimer = 0;
