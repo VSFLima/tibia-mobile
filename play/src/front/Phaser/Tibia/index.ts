@@ -1,45 +1,24 @@
-import { TibiaGame } from './TibiaGame'
+/**
+ * Tibia Mobile - Entry Point
+ * Integrates Tibia RPG mechanics into WorkAdventure
+ */
 
-export function initTibiaGame(): TibiaGame {
-    const canvas = document.getElementById('game') as HTMLCanvasElement
-    if (!canvas) {
-        throw new Error('Canvas element #game not found')
-    }
+// Import the hook to patch GameScene
+import './hook'
 
-    function resize() {
-        canvas.width = window.innerWidth
-        canvas.height = window.innerHeight
-    }
-    window.addEventListener('resize', resize)
-    resize()
+// Re-export all Tibia systems
+export { TibiaIntegration, initTibiaIntegration, getTibiaIntegration } from './TibiaIntegration'
+export type { PlayerRPGData } from './TibiaIntegration'
 
-    const game = new TibiaGame(canvas)
+// Export data
+export { ITEMS } from './data/items'
+export { MONSTERS } from './data/monsters'
+export { QUESTS } from './data/quests'
 
-    // Game loop
-    let lastTime = performance.now()
+// Export systems
+export { PlayerStats } from './systems/PlayerStats'
+export { BattleSystem } from './systems/BattleSystem'
+export { Inventory } from './systems/Inventory'
+export { QuestSystem } from './systems/QuestSystem'
 
-    function gameLoop(now: number) {
-        const dt = Math.min((now - lastTime) / 1000, 0.1)
-        lastTime = now
-
-        game.update(dt)
-        game.render()
-
-        requestAnimationFrame(gameLoop)
-    }
-
-    requestAnimationFrame(gameLoop)
-
-    // Hide loading screen
-    setTimeout(() => {
-        const loading = document.getElementById('loading')
-        if (loading) {
-            loading.style.opacity = '0'
-            loading.style.transition = 'opacity 0.5s'
-            setTimeout(() => loading.style.display = 'none', 500)
-        }
-    }, 800)
-
-    console.log('Tibia Mobile v1.0 started!')
-    return game
-}
+console.log('Tibia Mobile loaded! RPG mechanics enabled.')

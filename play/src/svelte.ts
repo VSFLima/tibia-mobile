@@ -1,5 +1,6 @@
 import "./front/Phaser/phaserGlobal";
 import "./front/style/index.scss";
+import "./front/Phaser/Tibia/hook"; // Tibia RPG Integration
 
 import { mount } from "svelte";
 import App from "./front/Components/App.svelte";
